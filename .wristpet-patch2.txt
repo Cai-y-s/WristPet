@@ -1,0 +1,32 @@
+*** Begin Patch
+*** Update File: D:/cxk/AndroidStudioProjects/WristPet/app/src/main/java/com/example/wristpet/MainActivity.kt
+@@
+     private lateinit var petView: PetView
+     private var petState = PetState()
++    private val dayFormat = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+@@
+         repository = PetRepository(this)
++        val firstMeeting = repository.isNewPet()
+         petState = repository.load()
+ 
+         petView = PetView(this).apply {
+             listener = this@MainActivity
+             setPetState(petState)
+-            setNotice("你好呀！摸摸我吧")
++            setNotice(greetingFor(firstMeeting))
+         }
+         setContentView(petView)
+     }
+@@
+-    private fun todayKey(now: Long = System.currentTimeMillis()): String =
+-        SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(now))
++    private fun greetingFor(firstMeeting: Boolean): String = when {
++        firstMeeting -> "你好呀！摸摸我吧"
++        petState.hunger <= 30 -> "你回来啦…我有点饿了"
++        petState.affection >= 80 -> "你回来啦！今天也最喜欢你"
++        else -> "你回来啦，欢迎欢迎"
++    }
++
++    private fun todayKey(now: Long = System.currentTimeMillis()): String =
++        dayFormat.format(Date(now))
+*** End Patch

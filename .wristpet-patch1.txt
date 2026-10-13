@@ -1,0 +1,173 @@
+*** Begin Patch
+*** Update File: D:/cxk/AndroidStudioProjects/WristPet/app/src/main/java/com/example/wristpet/ui/PetView.kt
+@@
+     private var mode = Mode.HOME
+     private var happyUntil = 0L
++    private var pressedAction: Action? = null
+ 
+     private var gameStartedAt = 0L
+@@
+     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+     private val rect = RectF()
++    private val typefaceRegular = Typeface.create("sans-serif", Typeface.NORMAL)
++    private val typefaceBold = Typeface.create("sans-serif", Typeface.BOLD)
+     private val ticker = object : Runnable {
+@@
+     fun setInteractive(active: Boolean) {
+         if (isInteractive == active) return
+         isInteractive = active
++        if (!active && pressedAction != null) pressedAction = null
+         handler.removeCallbacks(ticker)
+         if (active) handler.post(ticker)
+     }
+@@
+     private fun drawActionButton(canvas: Canvas, cx: Float, cy: Float, label: String, action: Action) {
+-        paint.color = color(PANEL)
++        paint.color = color(if (pressedAction == action) PANEL_PRESSED else PANEL)
+         rect.set(cx - 34f, cy - 24f, cx + 34f, cy + 24f)
+@@
+         mode = Mode.GAME
+         gameStartedAt = SystemClock.elapsedRealtime()
++        pressedAction = null
+         gameScore = 0
+@@
+     override fun onTouchEvent(event: MotionEvent): Boolean {
+-        if (event.action != MotionEvent.ACTION_UP) return true
+-        val logicalScale = min(width.toFloat(), height.toFloat()) / DESIGN_SIZE
+-        val offsetX = (width - DESIGN_SIZE * logicalScale) / 2f
+-        val offsetY = (height - DESIGN_SIZE * logicalScale) / 2f
+-        val x = (event.x - offsetX) / logicalScale
+-        val y = (event.y - offsetY) / logicalScale
+-
+-        if (mode == Mode.GAME) {
+-            if (y in 308f..344f && x in 130f..230f) {
+-                finishGameEarly()
+-                return true
+-            }
+-            val elapsed = gameElapsed()
+-            if (elapsed >= GAME_LENGTH_MS) {
+-                finishGameEarly()
+-                return true
+-            }
+-            val round = (elapsed / ROTATION_MS).toInt()
+-            // This is a timing game: the player may tap anywhere on the screen.
+-            // A hit is awarded only while the moving dot is inside the top target arc.
+-            val dotAngle = -PI / 2.0 + (elapsed % ROTATION_MS).toDouble() / ROTATION_MS * 2.0 * PI
+-            val diff = angleDistance(dotAngle, -PI / 2.0)
+-            if (diff <= HIT_WINDOW_RADIANS && round != lastHitRound) {
+-                gameScore += 1
+-                lastHitRound = round
+-                gameHint = "命中！很好！"
+-            } else if (round == lastHitRound) {
+-                gameHint = "本圈已经命中啦"
+-            } else {
+-                gameHint = "差一点，再试试"
+-            }
+-            invalidate()
+-            return true
+-        }
+-
+-        if (y in 263f..333f) {
+-            when {
+-                x in 40f..116f -> listener?.onFeed()
+-                x in 142f..218f -> listener?.onPet()
+-                x in 244f..320f -> startGame()
+-            }
+-        }
+-        return true
+-    }
++        val action = event.actionMasked
++        if (action != MotionEvent.ACTION_DOWN && action != MotionEvent.ACTION_UP && action != MotionEvent.ACTION_CANCEL) {
++            return true
++        }
++        val (x, y) = logicalPoint(event)
++
++        when (action) {
++            MotionEvent.ACTION_DOWN -> {
++                if (mode == Mode.HOME) {
++                    val pressed = homeButtonAt(x, y)
++                    if (pressed != pressedAction) {
++                        pressedAction = pressed
++                        invalidate()
++                    }
++                }
++            }
++
++            MotionEvent.ACTION_CANCEL -> {
++                if (pressedAction != null) {
++                    pressedAction = null
++                    invalidate()
++                }
++            }
++
++            MotionEvent.ACTION_UP -> {
++                val released = pressedAction
++                if (pressedAction != null) {
++                    pressedAction = null
++                    invalidate()
++                }
++                if (mode == Mode.GAME) {
++                    if (y in 308f..344f && x in 130f..230f) {
++                        finishGameEarly()
++                        return true
++                    }
++                    val elapsed = gameElapsed()
++                    if (elapsed >= GAME_LENGTH_MS) {
++                        finishGameEarly()
++                        return true
++                    }
++                    val round = (elapsed / ROTATION_MS).toInt()
++                    // This is a timing game: the player may tap anywhere on the screen.
++                    // A hit is awarded only while the moving dot is inside the top target arc.
++                    val dotAngle = -PI / 2.0 + (elapsed % ROTATION_MS).toDouble() / ROTATION_MS * 2.0 * PI
++                    val diff = angleDistance(dotAngle, -PI / 2.0)
++                    if (diff <= HIT_WINDOW_RADIANS && round != lastHitRound) {
++                        gameScore += 1
++                        lastHitRound = round
++                        gameHint = "命中！很好！"
++                    } else if (round == lastHitRound) {
++                        gameHint = "本圈已经命中啦"
++                    } else {
++                        gameHint = "差一点，再试试"
++                    }
++                    invalidate()
++                    return true
++                }
++                if (released != null && homeButtonAt(x, y) == released) {
++                    when (released) {
++                        Action.FEED -> listener?.onFeed()
++                        Action.PET -> listener?.onPet()
++                        Action.GAME -> startGame()
++                    }
++                }
++            }
++
++            else -> Unit
++        }
++        return true
++    }
++
++    private fun logicalPoint(event: MotionEvent): Pair<Float, Float> {
++        val logicalScale = min(width.toFloat(), height.toFloat()) / DESIGN_SIZE
++        val offsetX = (width - DESIGN_SIZE * logicalScale) / 2f
++        val offsetY = (height - DESIGN_SIZE * logicalScale) / 2f
++        return Pair((event.x - offsetX) / logicalScale, (event.y - offsetY) / logicalScale)
++    }
++
++    private fun homeButtonAt(x: Float, y: Float): Action? {
++        if (y !in 263f..333f) return null
++        return when {
++            x in 40f..116f -> Action.FEED
++            x in 142f..218f -> Action.PET
++            x in 244f..320f -> Action.GAME
++            else -> null
++        }
++    }
+@@
+-        paint.typeface = Typeface.create("sans-serif", if (bold) Typeface.BOLD else Typeface.NORMAL)
++        paint.typeface = if (bold) typefaceBold else typefaceRegular
+@@
+         const val PANEL = 0x172326
++        const val PANEL_PRESSED = 0x27464C
+         const val TRACK = 0x2A3A3D
+*** End Patch

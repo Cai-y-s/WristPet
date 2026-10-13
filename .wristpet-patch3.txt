@@ -1,0 +1,15 @@
+*** Begin Patch
+*** Update File: D:/cxk/AndroidStudioProjects/WristPet/app/src/main/java/com/example/wristpet/pet/PetRepository.kt
+@@
+     private val prefs = context.applicationContext.getSharedPreferences("wrist_pet_save", Context.MODE_PRIVATE)
++    private val dayFormat = SimpleDateFormat("yyyy-MM-dd", Locale.US)
++
++    /** True while no save exists yet; lets the UI greet a brand-new pet differently. */
++    fun isNewPet(): Boolean = !prefs.getBoolean(KEY_CREATED, false)
+ 
+     fun load(): PetState {
+@@
+-    private fun dayKey(timeMillis: Long): String =
+-        SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(timeMillis))
++    private fun dayKey(timeMillis: Long): String = dayFormat.format(Date(timeMillis))
+*** End Patch

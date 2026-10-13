@@ -1,0 +1,8 @@
+*** Begin Patch
+*** Update File: D:/cxk/AndroidStudioProjects/WristPet/app/build.gradle.kts
+@@
+-        versionCode = 2
+-        versionName = "0.2.0"
++        versionCode = 3
++        versionName = "0.2.1"
+*** End Patch
