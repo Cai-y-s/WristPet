@@ -69,9 +69,17 @@ class PetView(context: Context) : View(context) {
     private var mode = Mode.HOME
     private var happyUntil = 0L
 
-    // Touch origin and scroll position for the daily-task list (360x360 logical coords).
+    // Shared touch/scroll state for the daily tasks and shop lists.
     private var touchDownX = 0f
     private var touchDownY = 0f
+    private var lastTouchY = 0f
+    private var touchDownTime = 0L
+    private var lastMoveTime = 0L
+    private var touchStartMode = Mode.HOME
+    private var touchStartedInScrollableViewport = false
+    private var draggingList = false
+    private var scrollVelocityPerFrame = 0f
+    private var flingMode: Mode? = null
     private var taskScrollY = 0f
 
     private var shopCategory = ShopItemType.ACCESSORY
@@ -101,8 +109,35 @@ class PetView(context: Context) : View(context) {
             } else if (mode == Mode.HOME) {
                 advanceBehavior()
             }
-            invalidate()
+            if (mode == Mode.HOME || mode == Mode.GAME) invalidate()
             handler.postDelayed(this, frameIntervalMs())
+        }
+    }
+
+    private val scrollFlingRunnable = object : Runnable {
+        override fun run() {
+            val listMode = flingMode ?: return
+            if (!isInteractive || mode != listMode) {
+                flingMode = null
+                scrollVelocityPerFrame = 0f
+                return
+            }
+
+            val oldScroll = scrollPosition(listMode)
+            val wanted = oldScroll + scrollVelocityPerFrame
+            val maxScroll = maxScrollFor(listMode)
+            val next = wanted.coerceIn(0f, maxScroll)
+            setScrollPosition(listMode, next)
+            if (next != wanted) scrollVelocityPerFrame = 0f
+            scrollVelocityPerFrame *= FLING_FRICTION
+            invalidate()
+
+            if (kotlin.math.abs(scrollVelocityPerFrame) >= FLING_STOP_THRESHOLD) {
+                handler.postDelayed(this, FLING_FRAME_MS)
+            } else {
+                flingMode = null
+                scrollVelocityPerFrame = 0f
+            }
         }
     }
 
@@ -125,6 +160,7 @@ class PetView(context: Context) : View(context) {
     fun setInteractive(active: Boolean) {
         if (isInteractive == active) return
         val now = SystemClock.elapsedRealtime()
+        if (!active) cancelScrollFling()
         if (!active && mode == Mode.GAME && gameStartedAt != 0L) {
             // Pause the game clock while the app is backgrounded or the screen is off.
             gameElapsedBeforePause += (now - gameStartedAt).coerceAtLeast(0L)
@@ -154,8 +190,9 @@ class PetView(context: Context) : View(context) {
     /** Lively states animate fast; sleepy states slow down to save battery. */
     private fun frameIntervalMs(): Long = when (mode) {
         Mode.GAME -> 45L
-        Mode.TASKS -> 500L
-        Mode.SHOP -> 500L
+        // Detail pages are static; active drag/fling events redraw them independently.
+        Mode.TASKS -> 1_000L
+        Mode.SHOP -> 1_000L
         Mode.HOME -> when (behavior?.state) {
             PetBehavior.State.EVOLVING -> 40L
             PetBehavior.State.HAPPY -> 50L
@@ -246,9 +283,9 @@ class PetView(context: Context) : View(context) {
     }
 
     private fun maxTaskScroll(): Float = (
-        TASK_FIRST_ROW_CENTER +
-            (TASK_COUNT - 1) * TASK_ROW_HEIGHT +
-            TASK_ROW_CARD_HALF_HEIGHT - TASK_VIEWPORT_BOTTOM
+        DETAIL_FIRST_ROW_CENTER +
+            (TASK_COUNT - 1) * DETAIL_ROW_HEIGHT +
+            DETAIL_ROW_HALF_HEIGHT - DETAIL_VIEWPORT_BOTTOM
         ).coerceAtLeast(0f)
 
     private fun drawDailyTasks(canvas: Canvas) {
@@ -282,9 +319,9 @@ class PetView(context: Context) : View(context) {
 
         // Clip only the scrolling list; title and return button stay fixed.
         val saveCount = canvas.save()
-        canvas.clipRect(38f, TASK_VIEWPORT_TOP, 322f, TASK_VIEWPORT_BOTTOM)
+        canvas.clipRect(38f, DETAIL_VIEWPORT_TOP, 322f, DETAIL_VIEWPORT_BOTTOM)
         rows.forEachIndexed { index, row ->
-            val centerY = TASK_FIRST_ROW_CENTER + index * TASK_ROW_HEIGHT - taskScrollY
+            val centerY = DETAIL_FIRST_ROW_CENTER + index * DETAIL_ROW_HEIGHT - taskScrollY
             drawTaskRow(
                 canvas = canvas,
                 centerY = centerY,
@@ -297,7 +334,7 @@ class PetView(context: Context) : View(context) {
         canvas.restoreToCount(saveCount)
 
         drawTaskScrollIndicator(canvas)
-        text(canvas, "上下滑动查看更多", 180f, 298f, 8.5f, MUTED)
+        text(canvas, if (maxTaskScroll() > 0f) "上下滑动查看更多" else "今日任务已展示完毕", 180f, 296f, 9f, MUTED)
 
         paint.color = color(PANEL)
         rect.set(126f, 306f, 234f, 336f)
@@ -314,7 +351,7 @@ class PetView(context: Context) : View(context) {
         completed: Boolean
     ) {
         paint.color = color(if (completed) 0x2030443C else PANEL)
-        rect.set(42f, centerY - TASK_ROW_CARD_HALF_HEIGHT, 316f, centerY + TASK_ROW_CARD_HALF_HEIGHT)
+        rect.set(42f, centerY - DETAIL_ROW_HALF_HEIGHT, 318f, centerY + DETAIL_ROW_HALF_HEIGHT)
         canvas.drawRoundRect(rect, 13f, 13f, paint)
 
         drawCircle(canvas, 58f, centerY - 1f, 9f, if (completed) MINT else TRACK)
@@ -324,8 +361,8 @@ class PetView(context: Context) : View(context) {
             drawCircle(canvas, 58f, centerY - 1f, 3f, GOLD)
         }
 
-        text(canvas, title, 75f, centerY - 2f, 12f, TEXT, bold = true, align = Paint.Align.LEFT)
-        text(canvas, subtitle, 75f, centerY + 15f, 9.2f, MUTED, align = Paint.Align.LEFT)
+        text(canvas, title, 75f, centerY - 4f, 12f, TEXT, bold = true, align = Paint.Align.LEFT)
+        text(canvas, subtitle, 75f, centerY + 14f, 9.2f, MUTED, align = Paint.Align.LEFT)
         text(
             canvas,
             if (completed) "已完成" else rewardOrStatus,
@@ -339,14 +376,17 @@ class PetView(context: Context) : View(context) {
     }
 
     private fun drawTaskScrollIndicator(canvas: Canvas) {
-        val top = TASK_VIEWPORT_TOP + 5f
-        val bottom = TASK_VIEWPORT_BOTTOM - 5f
-        val thumbHeight = 42f
-        val travel = (bottom - top - thumbHeight).coerceAtLeast(0f)
-        val maxScroll = maxTaskScroll()
-        val fraction = if (maxScroll <= 0f) 0f else (taskScrollY / maxScroll).coerceIn(0f, 1f)
-        val thumbTop = top + travel * fraction
+        drawSharedScrollIndicator(canvas, taskScrollY, maxTaskScroll())
+    }
 
+    private fun drawSharedScrollIndicator(canvas: Canvas, scrollY: Float, maxScroll: Float) {
+        if (maxScroll <= 0f) return
+        val top = DETAIL_VIEWPORT_TOP + 5f
+        val bottom = DETAIL_VIEWPORT_BOTTOM - 5f
+        val thumbHeight = 38f
+        val travel = (bottom - top - thumbHeight).coerceAtLeast(0f)
+        val fraction = (scrollY / maxScroll).coerceIn(0f, 1f)
+        val thumbTop = top + travel * fraction
         paint.color = color(TRACK)
         rect.set(320f, top, 323f, bottom)
         canvas.drawRoundRect(rect, 1.5f, 1.5f, paint)
@@ -378,19 +418,19 @@ class PetView(context: Context) : View(context) {
         val maxScroll = maxShopScroll(items.size)
         shopScrollY = shopScrollY.coerceIn(0f, maxScroll)
         val saveCount = canvas.save()
-        canvas.clipRect(38f, SHOP_VIEWPORT_TOP, 322f, SHOP_VIEWPORT_BOTTOM)
+        canvas.clipRect(38f, DETAIL_VIEWPORT_TOP, 322f, DETAIL_VIEWPORT_BOTTOM)
         items.forEachIndexed { index, item ->
-            val centerY = SHOP_FIRST_ROW_CENTER + index * SHOP_ROW_HEIGHT - shopScrollY
+            val centerY = DETAIL_FIRST_ROW_CENTER + index * DETAIL_ROW_HEIGHT - shopScrollY
             drawShopItemRow(canvas, centerY, item)
         }
         canvas.restoreToCount(saveCount)
         drawShopScrollIndicator(canvas, items.size)
 
-        text(canvas, shopNotice, 180f, 300f, 8.2f, MINT)
+        text(canvas, shopNotice, 180f, 296f, 9f, MINT)
         paint.color = color(PANEL)
-        rect.set(126f, 307f, 234f, 337f)
+        rect.set(126f, 306f, 234f, 336f)
         canvas.drawRoundRect(rect, 15f, 15f, paint)
-        text(canvas, "返回主页", 180f, 326f, 10.5f, TEXT, bold = true)
+        text(canvas, "返回主页", 180f, 325f, 11f, TEXT, bold = true)
     }
 
     private fun drawShopTab(
@@ -414,20 +454,20 @@ class PetView(context: Context) : View(context) {
     }
 
     private fun maxShopScroll(itemCount: Int): Float = (
-        SHOP_FIRST_ROW_CENTER + (itemCount - 1).coerceAtLeast(0) * SHOP_ROW_HEIGHT +
-            SHOP_ROW_HALF_HEIGHT - SHOP_VIEWPORT_BOTTOM
+        DETAIL_FIRST_ROW_CENTER + (itemCount - 1).coerceAtLeast(0) * DETAIL_ROW_HEIGHT +
+            DETAIL_ROW_HALF_HEIGHT - DETAIL_VIEWPORT_BOTTOM
         ).coerceAtLeast(0f)
 
     private fun drawShopItemRow(canvas: Canvas, centerY: Float, item: ShopItem) {
         val owned = ShopCatalog.isOwned(state, item)
         val equipped = ShopCatalog.isEquipped(state, item)
         paint.color = color(if (equipped) 0x2030443C else PANEL)
-        rect.set(42f, centerY - SHOP_ROW_HALF_HEIGHT, 318f, centerY + SHOP_ROW_HALF_HEIGHT)
+        rect.set(42f, centerY - DETAIL_ROW_HALF_HEIGHT, 318f, centerY + DETAIL_ROW_HALF_HEIGHT)
         canvas.drawRoundRect(rect, 12f, 12f, paint)
         drawShopItemIcon(canvas, item, 61f, centerY)
 
-        text(canvas, item.name, 82f, centerY - 3f, 10.5f, TEXT, bold = true, align = Paint.Align.LEFT)
-        text(canvas, item.description, 82f, centerY + 12f, 8f, MUTED, align = Paint.Align.LEFT)
+        text(canvas, item.name, 82f, centerY - 4f, 11.5f, TEXT, bold = true, align = Paint.Align.LEFT)
+        text(canvas, item.description, 82f, centerY + 14f, 9f, MUTED, align = Paint.Align.LEFT)
 
         val actionLabel = when {
             item.type == ShopItemType.PET && equipped -> "当前"
@@ -443,10 +483,10 @@ class PetView(context: Context) : View(context) {
             state.coins >= item.price -> 0x253D6655
             else -> 0x254D3B32
         })
-        rect.set(253f, centerY - 13f, 311f, centerY + 13f)
+        rect.set(251f, centerY - 14f, 311f, centerY + 14f)
         canvas.drawRoundRect(rect, 9f, 9f, paint)
         text(
-            canvas, actionLabel, 282f, centerY + 3.5f, 8.5f,
+            canvas, actionLabel, 281f, centerY + 3.5f, 9f,
             when {
                 equipped -> MINT
                 owned -> TEXT
@@ -535,20 +575,7 @@ class PetView(context: Context) : View(context) {
     }
 
     private fun drawShopScrollIndicator(canvas: Canvas, itemCount: Int) {
-        val maxScroll = maxShopScroll(itemCount)
-        if (maxScroll <= 0f) return
-        val top = SHOP_VIEWPORT_TOP + 4f
-        val bottom = SHOP_VIEWPORT_BOTTOM - 4f
-        val thumbHeight = 34f
-        val travel = (bottom - top - thumbHeight).coerceAtLeast(0f)
-        val fraction = (shopScrollY / maxScroll).coerceIn(0f, 1f)
-        val thumbTop = top + travel * fraction
-        paint.color = color(TRACK)
-        rect.set(320f, top, 323f, bottom)
-        canvas.drawRoundRect(rect, 1.5f, 1.5f, paint)
-        paint.color = color(MINT)
-        rect.set(319f, thumbTop, 324f, thumbTop + thumbHeight)
-        canvas.drawRoundRect(rect, 2f, 2f, paint)
+        drawSharedScrollIndicator(canvas, shopScrollY, maxShopScroll(itemCount))
     }
 
     // ---------------------------------------------------------------- pet body
@@ -1316,6 +1343,47 @@ class PetView(context: Context) : View(context) {
         invalidate()
     }
 
+    private fun cancelScrollFling() {
+        handler.removeCallbacks(scrollFlingRunnable)
+        flingMode = null
+        scrollVelocityPerFrame = 0f
+    }
+
+    private fun startScrollFling(listMode: Mode, velocityPerFrame: Float) {
+        cancelScrollFling()
+        if (!isInteractive || (listMode != Mode.TASKS && listMode != Mode.SHOP)) return
+        val boundedVelocity = velocityPerFrame.coerceIn(-MAX_FLING_VELOCITY, MAX_FLING_VELOCITY)
+        if (kotlin.math.abs(boundedVelocity) < FLING_START_THRESHOLD) return
+        flingMode = listMode
+        scrollVelocityPerFrame = boundedVelocity
+        handler.postDelayed(scrollFlingRunnable, FLING_FRAME_MS)
+    }
+
+    private fun scrollPosition(listMode: Mode): Float = when (listMode) {
+        Mode.TASKS -> taskScrollY
+        Mode.SHOP -> shopScrollY
+        else -> 0f
+    }
+
+    private fun maxScrollFor(listMode: Mode): Float = when (listMode) {
+        Mode.TASKS -> maxTaskScroll()
+        Mode.SHOP -> maxShopScroll(ShopCatalog.items(shopCategory).size)
+        else -> 0f
+    }
+
+    private fun setScrollPosition(listMode: Mode, value: Float) {
+        val safeValue = value.coerceIn(0f, maxScrollFor(listMode))
+        when (listMode) {
+            Mode.TASKS -> taskScrollY = safeValue
+            Mode.SHOP -> shopScrollY = safeValue
+            else -> return
+        }
+    }
+
+    private fun applyScrollDelta(listMode: Mode, delta: Float) {
+        setScrollPosition(listMode, scrollPosition(listMode) + delta)
+    }
+
     override fun onTouchEvent(event: MotionEvent): Boolean {
         val logicalScale = min(width.toFloat(), height.toFloat()) / DESIGN_SIZE
         if (logicalScale <= 0f) return true
@@ -1325,22 +1393,73 @@ class PetView(context: Context) : View(context) {
         val y = (event.y - offsetY) / logicalScale
 
         if (event.action == MotionEvent.ACTION_DOWN) {
+            cancelScrollFling()
             touchDownX = x
             touchDownY = y
+            lastTouchY = y
+            touchDownTime = event.eventTime
+            lastMoveTime = event.eventTime
+            touchStartMode = mode
+            touchStartedInScrollableViewport = when (mode) {
+                Mode.TASKS -> y in DETAIL_VIEWPORT_TOP..DETAIL_VIEWPORT_BOTTOM
+                Mode.SHOP -> y in DETAIL_VIEWPORT_TOP..DETAIL_VIEWPORT_BOTTOM
+                else -> false
+            }
+            draggingList = false
             return true
         }
+
+        if (event.action == MotionEvent.ACTION_MOVE) {
+            if (touchStartedInScrollableViewport && touchStartMode == mode) {
+                val totalX = x - touchDownX
+                val totalY = y - touchDownY
+                val wasDragging = draggingList
+                if (!draggingList && kotlin.math.abs(totalY) >= DRAG_START_THRESHOLD &&
+                    kotlin.math.abs(totalY) > kotlin.math.abs(totalX)) {
+                    draggingList = true
+                }
+
+                if (draggingList) {
+                    val dtSinceDown = (event.eventTime - touchDownTime).coerceAtLeast(1L).toFloat()
+                    val dtSinceMove = (event.eventTime - lastMoveTime).coerceAtLeast(1L).toFloat()
+                    val contentDelta = if (!wasDragging) touchDownY - y else lastTouchY - y
+                    applyScrollDelta(touchStartMode, contentDelta)
+                    val measuredVelocity = if (!wasDragging) {
+                        contentDelta * FLING_FRAME_MS / dtSinceDown
+                    } else {
+                        (lastTouchY - y) * FLING_FRAME_MS / dtSinceMove
+                    }
+                    scrollVelocityPerFrame = (
+                        scrollVelocityPerFrame * VELOCITY_SMOOTHING +
+                            measuredVelocity * (1f - VELOCITY_SMOOTHING)
+                        ).coerceIn(-MAX_FLING_VELOCITY, MAX_FLING_VELOCITY)
+                    invalidate()
+                }
+            }
+            lastTouchY = y
+            lastMoveTime = event.eventTime
+            return true
+        }
+
+        if (event.action == MotionEvent.ACTION_CANCEL) {
+            draggingList = false
+            touchStartedInScrollableViewport = false
+            scrollVelocityPerFrame = 0f
+            return true
+        }
+
         if (event.action != MotionEvent.ACTION_UP) return true
 
+        if (draggingList) {
+            startScrollFling(touchStartMode, scrollVelocityPerFrame)
+            draggingList = false
+            touchStartedInScrollableViewport = false
+            invalidate()
+            return true
+        }
+        touchStartedInScrollableViewport = false
+
         if (mode == Mode.TASKS) {
-            val deltaY = y - touchDownY
-            val deltaX = x - touchDownX
-            val beganInList = touchDownY in TASK_VIEWPORT_TOP..TASK_VIEWPORT_BOTTOM
-            if (beganInList && abs(deltaY) >= TASK_SWIPE_THRESHOLD && abs(deltaY) > abs(deltaX)) {
-                // Swipe up advances to later tasks; swipe down returns to earlier tasks.
-                taskScrollY = (taskScrollY - deltaY).coerceIn(0f, maxTaskScroll())
-                invalidate()
-                return true
-            }
             if (x in 120f..240f && y in 300f..340f) {
                 mode = Mode.HOME
                 invalidate()
@@ -1349,14 +1468,6 @@ class PetView(context: Context) : View(context) {
         }
 
         if (mode == Mode.SHOP) {
-            val deltaY = y - touchDownY
-            val deltaX = x - touchDownX
-            val beganInList = touchDownY in SHOP_VIEWPORT_TOP..SHOP_VIEWPORT_BOTTOM
-            if (beganInList && abs(deltaY) >= TASK_SWIPE_THRESHOLD && abs(deltaY) > abs(deltaX)) {
-                shopScrollY = (shopScrollY - deltaY).coerceIn(0f, maxShopScroll(ShopCatalog.items(shopCategory).size))
-                invalidate()
-                return true
-            }
             if (y in 55f..89f) {
                 when {
                     x in 40f..176f -> { shopCategory = ShopItemType.ACCESSORY; shopScrollY = 0f }
@@ -1365,17 +1476,17 @@ class PetView(context: Context) : View(context) {
                 invalidate()
                 return true
             }
-            if (x in 120f..240f && y in 302f..342f) {
+            if (x in 120f..240f && y in 300f..340f) {
                 mode = Mode.HOME
                 invalidate()
                 return true
             }
-            if (beganInList && x in 38f..320f) {
+            if (y in DETAIL_VIEWPORT_TOP..DETAIL_VIEWPORT_BOTTOM && x in 38f..320f) {
                 val items = ShopCatalog.items(shopCategory)
-                val index = kotlin.math.round((y + shopScrollY - SHOP_FIRST_ROW_CENTER) / SHOP_ROW_HEIGHT).toInt()
+                val index = kotlin.math.round((y + shopScrollY - DETAIL_FIRST_ROW_CENTER) / DETAIL_ROW_HEIGHT).toInt()
                 if (index in items.indices) {
-                    val rowCenter = SHOP_FIRST_ROW_CENTER + index * SHOP_ROW_HEIGHT - shopScrollY
-                    if (kotlin.math.abs(y - rowCenter) <= SHOP_ROW_HALF_HEIGHT + 4f) {
+                    val rowCenter = DETAIL_FIRST_ROW_CENTER + index * DETAIL_ROW_HEIGHT - shopScrollY
+                    if (kotlin.math.abs(y - rowCenter) <= DETAIL_ROW_HALF_HEIGHT + 4f) {
                         listener?.onShopItemSelected(items[index].id)
                     }
                 }
@@ -1395,7 +1506,6 @@ class PetView(context: Context) : View(context) {
                 return true
             }
             val round = ((elapsed + ROTATION_MS / 2L) / ROTATION_MS).toInt()
-            // The player can tap anywhere, but only one hit is counted per pass.
             val dotAngle = -PI / 2.0 + (elapsed % ROTATION_MS).toDouble() / ROTATION_MS * 2.0 * PI
             val diff = angleDistance(dotAngle, -PI / 2.0)
             if (diff <= HIT_WINDOW_RADIANS && round != lastHitRound) {
@@ -1511,18 +1621,20 @@ class PetView(context: Context) : View(context) {
         const val DESIGN_SIZE = 360f
         const val GAME_LENGTH_MS = 10_000L
         const val QUESTION_MARK_MS = 1_700L
-        const val TASK_VIEWPORT_TOP = 65f
-        const val TASK_VIEWPORT_BOTTOM = 284f
-        const val TASK_FIRST_ROW_CENTER = 92f
-        const val TASK_ROW_HEIGHT = 58f
-        const val TASK_ROW_CARD_HALF_HEIGHT = 25f
+        // Task and shop details share identical card sizes and a common scroll viewport.
+        const val DETAIL_VIEWPORT_TOP = 90f
+        const val DETAIL_VIEWPORT_BOTTOM = 281f
+        const val DETAIL_FIRST_ROW_CENTER = 120f
+        const val DETAIL_ROW_HEIGHT = 66f
+        const val DETAIL_ROW_HALF_HEIGHT = 29f
         const val TASK_COUNT = 5
-        const val TASK_SWIPE_THRESHOLD = 24f
-        const val SHOP_VIEWPORT_TOP = 90f
-        const val SHOP_VIEWPORT_BOTTOM = 284f
-        const val SHOP_FIRST_ROW_CENTER = 112f
-        const val SHOP_ROW_HEIGHT = 53f
-        const val SHOP_ROW_HALF_HEIGHT = 23f
+        const val DRAG_START_THRESHOLD = 5f
+        const val FLING_FRAME_MS = 16L
+        const val FLING_FRICTION = 0.90f
+        const val FLING_STOP_THRESHOLD = 0.25f
+        const val FLING_START_THRESHOLD = 0.7f
+        const val MAX_FLING_VELOCITY = 18f
+        const val VELOCITY_SMOOTHING = 0.35f
         const val ROTATION_MS = 1_500L
         const val HIT_WINDOW_RADIANS = 0.27
 

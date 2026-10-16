@@ -8,6 +8,8 @@ data class PetState(
     val coins: Int = 0,
     /** Anchor for offline hunger decay; keeps partial 20-minute intervals. */
     val lastUpdatedAt: Long = System.currentTimeMillis(),
+    /** Anchor for gradual affection decay; old saves initialize this to load time. */
+    val lastAffectionDecayAt: Long = System.currentTimeMillis(),
     /** XP earned from all sources during expDay. */
     val dailyExpEarned: Int = 0,
     /** Local calendar day in yyyy-MM-dd format. */
@@ -68,8 +70,9 @@ data class PetState(
 
     fun canFeed(): Boolean = hunger < FEED_HUNGER_LIMIT
 
-    fun canPet(now: Long): Boolean = affection < 100 &&
-        (lastPettedAt <= 0L || (now >= lastPettedAt && now - lastPettedAt >= PET_COOLDOWN_MS))
+    /** Petting stays available at full affection; it just cannot raise affection past 100. */
+    fun canPet(now: Long): Boolean =
+        lastPettedAt <= 0L || (now >= lastPettedAt && now - lastPettedAt >= PET_COOLDOWN_MS)
 
     fun fed(dayKey: String): PetState {
         val base = forDay(dayKey)
@@ -81,10 +84,12 @@ data class PetState(
     fun petted(now: Long, dayKey: String): PetState {
         val base = forDay(dayKey)
         if (!base.canPet(now)) return base
+        val newAffection = (base.affection + PET_AFFECTION_AMOUNT).coerceAtMost(100)
+        val affectionIncreased = newAffection > base.affection
         return base.copy(
-            affection = (base.affection + PET_AFFECTION_AMOUNT).coerceAtMost(100),
+            affection = newAffection,
             lastPettedAt = now
-        ).withExperience(1, dayKey)
+        ).withExperience(if (affectionIncreased) 1 else 0, dayKey)
     }
 
     /**
@@ -132,5 +137,7 @@ data class PetState(
         const val FEED_AMOUNT = 28
         const val PET_AFFECTION_AMOUNT = 4
         const val PET_COOLDOWN_MS = 60_000L
+        /** Affection decreases by one point per four elapsed hours, down to zero. */
+        const val AFFECTION_DECAY_INTERVAL_MS = 4L * 60L * 60L * 1000L
     }
 }

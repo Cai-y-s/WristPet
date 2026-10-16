@@ -92,10 +92,6 @@ class MainActivity : Activity(), PetView.Listener {
         val today = todayKey(now)
         val fresh = currentState(now)
         val petName = ShopCatalog.petName(fresh.activePetId)
-        if (fresh.affection >= 100) {
-            publish(fresh, "${petName}已经被你摸得超开心啦！")
-            return
-        }
         if (!fresh.canPet(now)) {
             publish(fresh, "刚刚摸过啦，过一会儿再来哦。")
             return
@@ -103,11 +99,12 @@ class MainActivity : Activity(), PetView.Listener {
         val petted = fresh.petted(now, today)
         val task = DailyRewards.claimTask(petted, DailyTask.PET, today)
         behavior.onInteraction()
-        publish(
-            task.state,
-            if (task.coinsAwarded > 0) "${petName}超喜欢你！每日照顾 +${task.coinsAwarded} 金币"
-            else "${petName}超喜欢你！"
-        )
+        val message = when {
+            task.coinsAwarded > 0 -> "${petName}超喜欢你！每日照顾 +${task.coinsAwarded} 金币"
+            petted.affection == fresh.affection && fresh.affection >= 100 -> "${petName}很享受你的陪伴！亲密度已满，仍然可以摸摸哦。"
+            else -> "${petName}超喜欢你！"
+        }
+        publish(task.state, message)
     }
 
     /** Backward-compatible callback for the original timing game. */

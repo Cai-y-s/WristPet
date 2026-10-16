@@ -23,6 +23,8 @@ class PetRepository(context: Context) {
             exp = prefs.getInt(KEY_EXP, 0).coerceIn(0, PetState.MAX_TOTAL_EXP),
             coins = prefs.getInt(KEY_COINS, 0).coerceIn(0, PetState.MAX_COINS),
             lastUpdatedAt = prefs.getLong(KEY_UPDATED, now).coerceAtMost(now),
+            // Migration safety: old saves start the affection-decay clock now.
+            lastAffectionDecayAt = prefs.getLong(KEY_AFFECTION_DECAY_UPDATED, now).coerceAtMost(now),
             dailyExpEarned = prefs.getInt(KEY_DAILY_EXP, 0).coerceIn(0, PetState.MAX_DAILY_EXP),
             // Old saves without these keys start today's cap at zero.
             expDay = prefs.getString(KEY_EXP_DAY, today) ?: today,
@@ -47,19 +49,47 @@ class PetRepository(context: Context) {
         return save(applyElapsedTime(stored, now).forDay(today))
     }
 
-    /** Hunger drops by one point per 20 elapsed minutes, preserving the remainder. */
+    /**
+     * Hunger drops by one point per 20 minutes; affection drops by one point per 4 hours.
+     * Both anchors preserve partial intervals, and affection never drops below zero.
+     */
     fun applyElapsedTime(state: PetState, now: Long = System.currentTimeMillis()): PetState {
-        val safeState = state.copy(hunger = state.hunger.coerceIn(20, 100))
-        val elapsed = (now - safeState.lastUpdatedAt).coerceAtLeast(0L)
-        val intervals = elapsed / HUNGER_INTERVAL_MS
-        if (intervals <= 0L) return safeState
+        val safeState = state.copy(
+            hunger = state.hunger.coerceIn(20, 100),
+            affection = state.affection.coerceIn(0, 100),
+            lastUpdatedAt = state.lastUpdatedAt.coerceAtMost(now),
+            lastAffectionDecayAt = state.lastAffectionDecayAt.coerceAtMost(now)
+        )
 
-        val loss = intervals.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
-        val nextHunger = max(20, safeState.hunger - loss)
-        val nextTimestamp = if (nextHunger <= 20) now else {
-            safeState.lastUpdatedAt + intervals * HUNGER_INTERVAL_MS
+        val hungerElapsed = (now - safeState.lastUpdatedAt).coerceAtLeast(0L)
+        val hungerIntervals = hungerElapsed / HUNGER_INTERVAL_MS
+        val afterHunger = if (hungerIntervals <= 0L) {
+            safeState
+        } else {
+            val loss = hungerIntervals.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+            val nextHunger = max(20, safeState.hunger - loss)
+            val nextTimestamp = if (nextHunger <= 20) now else {
+                safeState.lastUpdatedAt + hungerIntervals * HUNGER_INTERVAL_MS
+            }
+            safeState.copy(hunger = nextHunger, lastUpdatedAt = nextTimestamp)
         }
-        return safeState.copy(hunger = nextHunger, lastUpdatedAt = nextTimestamp)
+
+        val affectionElapsed = (now - afterHunger.lastAffectionDecayAt).coerceAtLeast(0L)
+        val affectionIntervals = affectionElapsed / PetState.AFFECTION_DECAY_INTERVAL_MS
+        if (affectionIntervals <= 0L) return afterHunger
+
+        val affectionLoss = affectionIntervals.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        val nextAffection = (afterHunger.affection - affectionLoss).coerceAtLeast(0)
+        val nextAffectionTimestamp = if (nextAffection <= 0) {
+            // Discard old elapsed time at the floor so affection does not carry an accumulated deficit.
+            now
+        } else {
+            afterHunger.lastAffectionDecayAt + affectionIntervals * PetState.AFFECTION_DECAY_INTERVAL_MS
+        }
+        return afterHunger.copy(
+            affection = nextAffection,
+            lastAffectionDecayAt = nextAffectionTimestamp
+        )
     }
 
     /** Save while retaining the partial interval before the next hunger decrease. */
@@ -75,6 +105,7 @@ class PetRepository(context: Context) {
             dailyGameCoinsEarned = todayState.dailyGameCoinsEarned.coerceIn(0, PetState.MAX_DAILY_GAME_COINS),
             discoveryCoins = todayState.discoveryCoins.coerceIn(0, 5),
             lastUpdatedAt = todayState.lastUpdatedAt.coerceAtMost(now),
+            lastAffectionDecayAt = todayState.lastAffectionDecayAt.coerceAtMost(now),
             lastPettedAt = todayState.lastPettedAt.coerceAtLeast(0L)
         )
         prefs.edit()
@@ -84,6 +115,7 @@ class PetRepository(context: Context) {
             .putInt(KEY_EXP, normalized.exp)
             .putInt(KEY_COINS, normalized.coins)
             .putLong(KEY_UPDATED, normalized.lastUpdatedAt)
+            .putLong(KEY_AFFECTION_DECAY_UPDATED, normalized.lastAffectionDecayAt)
             .putInt(KEY_DAILY_EXP, normalized.dailyExpEarned)
             .putString(KEY_EXP_DAY, normalized.expDay)
             .putLong(KEY_LAST_PETTED, normalized.lastPettedAt)
@@ -116,6 +148,7 @@ class PetRepository(context: Context) {
         const val KEY_EXP = "exp"
         const val KEY_COINS = "coins"
         const val KEY_UPDATED = "updated_at"
+        const val KEY_AFFECTION_DECAY_UPDATED = "affection_decay_updated_at"
         const val KEY_DAILY_EXP = "daily_exp"
         const val KEY_EXP_DAY = "exp_day"
         const val KEY_LAST_PETTED = "last_petted_at"
