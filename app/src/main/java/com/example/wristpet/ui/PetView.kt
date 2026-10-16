@@ -13,33 +13,72 @@ import android.view.MotionEvent
 import android.view.View
 import kotlin.math.PI
 import kotlin.math.abs
-import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.sin
 
+import com.example.wristpet.pet.DailyRewards
+import com.example.wristpet.pet.DailyTask
+import com.example.wristpet.pet.PetBehavior
 import com.example.wristpet.pet.PetState
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
-/** A dependency-free Canvas UI sized in a 360x360 logical square and clipped by the watch's round display. */
+/**
+ * Dependency-free Canvas UI sized in a 360x360 logical square and clipped by the
+ * watch's round display.
+ *
+ * Rendering contract: this view NEVER decides what the pet does. It only reads the
+ * [PetBehavior] state machine (owned by the activity's game-logic layer) and turns
+ * (state, stateElapsedMs) into pixels. Every motion — blink, sway, hop, bounce,
+ * yawn, breathing, floating "Zzz" — is a deterministic function of that snapshot,
+ * so no animation timers live here.
+ *
+ * Frame pacing follows the state: lively states redraw fast, sleepy ones slow down
+ * to save battery. The frame loop stops completely when the view is not interactive
+ * (app backgrounded or screen off), which also pauses the behavior clock.
+ */
 class PetView(context: Context) : View(context) {
     interface Listener {
         fun onFeed()
         fun onPet()
+        fun onWake()
+        /** Backward-compatible callback retained for older callers. */
         fun onGameFinished(score: Int)
+        fun onClaimDiscovery()
+
+        /** Common reward entry point for current and future minigames. */
+        fun onMiniGameFinished(gameId: String, score: Int, completedNormally: Boolean) {
+            onGameFinished(score)
+        }
     }
 
     var listener: Listener? = null
+
+    /** Injected by the game-logic layer; the renderer only reads it. */
+    var behavior: PetBehavior? = null
+
     private var state = PetState()
-    private var notice = "你好呀！摸摸我吧"
+    private var notice = "你好呀，摸摸我吧！"
     private var isInteractive = false
     private var mode = Mode.HOME
     private var happyUntil = 0L
 
+    // Touch origin and scroll position for the daily-task list (360x360 logical coords).
+    private var touchDownX = 0f
+    private var touchDownY = 0f
+    private var taskScrollY = 0f
+
     private var gameStartedAt = 0L
+    private var gameElapsedBeforePause = 0L
     private var gameScore = 0
     private var lastHitRound = -1
     private var gameHint = "光点到达顶部亮区时点击"
     private var gameResultSent = false
+
+    /** Wall-clock anchor used to compute frame deltas for the behavior machine. */
+    private var lastFrameAt = 0L
 
     private val handler = Handler(Looper.getMainLooper())
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
@@ -47,13 +86,15 @@ class PetView(context: Context) : View(context) {
     private val ticker = object : Runnable {
         override fun run() {
             if (!isInteractive) return
-            if (mode == Mode.GAME && !gameResultSent && gameElapsed() >= GAME_LENGTH_MS) {
-                gameResultSent = true
-                mode = Mode.HOME
-                listener?.onGameFinished(gameScore)
+            if (mode == Mode.GAME) {
+                if (!gameResultSent && gameElapsed() >= GAME_LENGTH_MS) {
+                    finishGameNormally()
+                }
+            } else if (mode == Mode.HOME) {
+                advanceBehavior()
             }
             invalidate()
-            handler.postDelayed(this, if (mode == Mode.GAME) 45L else 600L)
+            handler.postDelayed(this, frameIntervalMs())
         }
     }
 
@@ -62,17 +103,54 @@ class PetView(context: Context) : View(context) {
         invalidate()
     }
 
-    fun setNotice(value: String) {
+    fun setNotice(value: String, durationMs: Long = 1_300L) {
         notice = value
-        happyUntil = SystemClock.uptimeMillis() + 1_300L
+        happyUntil = SystemClock.uptimeMillis() + durationMs.coerceAtLeast(0L)
         invalidate()
     }
 
     fun setInteractive(active: Boolean) {
         if (isInteractive == active) return
+        val now = SystemClock.elapsedRealtime()
+        if (!active && mode == Mode.GAME && gameStartedAt != 0L) {
+            // Pause the game clock while the app is backgrounded or the screen is off.
+            gameElapsedBeforePause += (now - gameStartedAt).coerceAtLeast(0L)
+            gameStartedAt = 0L
+        }
         isInteractive = active
         handler.removeCallbacks(ticker)
-        if (active) handler.post(ticker)
+        if (active) {
+            if (mode == Mode.GAME && gameStartedAt == 0L) gameStartedAt = now
+            lastFrameAt = now
+            handler.post(ticker)
+        } else {
+            lastFrameAt = 0L
+        }
+    }
+
+    /** Feed real elapsed time into the state machine (foreground frames only). */
+    private fun advanceBehavior() {
+        val machine = behavior ?: return
+        val now = SystemClock.elapsedRealtime()
+        if (lastFrameAt == 0L) lastFrameAt = now
+        val delta = (now - lastFrameAt).coerceIn(0L, MAX_FRAME_DELTA_MS)
+        lastFrameAt = now
+        machine.tick(delta)
+    }
+
+    /** Lively states animate fast; sleepy states slow down to save battery. */
+    private fun frameIntervalMs(): Long = when (mode) {
+        Mode.GAME -> 45L
+        Mode.TASKS -> 500L
+        Mode.HOME -> when (behavior?.state) {
+            PetBehavior.State.EVOLVING -> 40L
+            PetBehavior.State.HAPPY -> 50L
+            PetBehavior.State.CURIOUS -> 70L
+            PetBehavior.State.IDLE -> 80L
+            PetBehavior.State.SLEEPY -> 110L
+            PetBehavior.State.SLEEPING -> 140L
+            null -> 600L
+        }
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -84,7 +162,11 @@ class PetView(context: Context) : View(context) {
         val saveCount = canvas.save()
         canvas.translate(offsetX, offsetY)
         canvas.scale(logicalScale, logicalScale)
-        if (mode == Mode.HOME) drawHome(canvas) else drawGame(canvas)
+        when (mode) {
+            Mode.HOME -> drawHome(canvas)
+            Mode.GAME -> drawGame(canvas)
+            Mode.TASKS -> drawDailyTasks(canvas)
+        }
         canvas.restoreToCount(saveCount)
     }
 
@@ -97,12 +179,16 @@ class PetView(context: Context) : View(context) {
 
         text(canvas, "腕上伙伴", 180f, 37f, 17f, TEXT, bold = true)
         text(canvas, "Lv.${state.level}  ·  ${state.stage}", 180f, 57f, 10f, MUTED)
+        drawDailyTaskButton(canvas)
 
         drawPet(canvas)
+        drawDiscoveryMarker(canvas)
 
         val mood = when {
             SystemClock.uptimeMillis() < happyUntil -> notice
-            state.hunger <= 30 -> "有一点饿啦…"
+            behavior?.state == PetBehavior.State.SLEEPING -> "睡着啦，轻一点哦。"
+            behavior?.state == PetBehavior.State.SLEEPY -> "有点困了呢。"
+            state.hunger <= 30 -> "有一点饿啦。"
             state.affection >= 80 -> "今天也最喜欢你！"
             else -> notice
         }
@@ -119,11 +205,312 @@ class PetView(context: Context) : View(context) {
         text(canvas, "经验 ${state.exp}  今日成长 ${state.dailyExpEarned}/${PetState.MAX_DAILY_EXP}  金币 ${state.coins}", 180f, 337f, 8.5f, MUTED)
     }
 
+    // ---------------------------------------------------------------- daily tasks
+
+    private data class TaskRowData(
+        val title: String,
+        val subtitle: String,
+        val rewardOrStatus: String,
+        val completed: Boolean
+    )
+
+    private fun drawDailyTaskButton(canvas: Canvas) {
+        paint.color = color(PANEL)
+        rect.set(241f, 38f, 289f, 66f)
+        canvas.drawRoundRect(rect, 12f, 12f, paint)
+        text(canvas, "任务", 265f, 56f, 10f, TEXT, bold = true)
+    }
+
+    private fun drawDiscoveryMarker(canvas: Canvas) {
+        if (!DailyRewards.hasDiscovery(state, todayKeyForView())) return
+        drawCircle(canvas, 244f, 135f, 13f, PANEL)
+        drawCircle(canvas, 244f, 135f, 8f, GOLD)
+        drawCircle(canvas, 244f, 135f, 3f, TEXT)
+        text(canvas, "+", 255f, 148f, 9f, GOLD, bold = true)
+    }
+
+    private fun maxTaskScroll(): Float = (
+        TASK_FIRST_ROW_CENTER +
+            (TASK_COUNT - 1) * TASK_ROW_HEIGHT +
+            TASK_ROW_CARD_HALF_HEIGHT - TASK_VIEWPORT_BOTTOM
+        ).coerceAtLeast(0f)
+
+    private fun drawDailyTasks(canvas: Canvas) {
+        val today = todayKeyForView()
+        text(canvas, "今日任务", 180f, 35f, 17f, TEXT, bold = true)
+        text(
+            canvas,
+            "金币 ${state.coins}  ·  游戏奖励 ${state.dailyGameCoinsEarned}/${PetState.MAX_DAILY_GAME_COINS}",
+            180f, 54f, 9.5f, MUTED
+        )
+
+        val discoveryStatus = when {
+            DailyRewards.hasDiscovery(state, today) -> "主页拾取"
+            state.discoveryDay == today && state.discoveryClaimedDay == today -> "已领取"
+            state.discoveryDay == today && state.discoveryCoins == 0 -> "今日未出现"
+            else -> "查看主页"
+        }
+
+        val rows = listOf(
+            TaskRowData("每日拜访", "今天首次打开应用", "+3 金币", DailyRewards.isClaimed(state, DailyTask.VISIT, today)),
+            TaskRowData("喂食小芽", "首次有效喂食", "+2 金币", DailyRewards.isClaimed(state, DailyTask.FEED, today)),
+            TaskRowData("摸摸小芽", "首次有效摸摸", "+2 金币", DailyRewards.isClaimed(state, DailyTask.PET, today)),
+            TaskRowData("陪它玩耍", "完整完成一局小游戏", "+3 金币", DailyRewards.isClaimed(state, DailyTask.GAME, today)),
+            TaskRowData(
+                "随机发现",
+                "每天最多出现一次",
+                discoveryStatus,
+                state.discoveryDay == today && state.discoveryClaimedDay == today
+            )
+        )
+
+        // Clip only the scrolling list; title and return button stay fixed.
+        val saveCount = canvas.save()
+        canvas.clipRect(38f, TASK_VIEWPORT_TOP, 322f, TASK_VIEWPORT_BOTTOM)
+        rows.forEachIndexed { index, row ->
+            val centerY = TASK_FIRST_ROW_CENTER + index * TASK_ROW_HEIGHT - taskScrollY
+            drawTaskRow(
+                canvas = canvas,
+                centerY = centerY,
+                title = row.title,
+                subtitle = row.subtitle,
+                rewardOrStatus = row.rewardOrStatus,
+                completed = row.completed
+            )
+        }
+        canvas.restoreToCount(saveCount)
+
+        drawTaskScrollIndicator(canvas)
+        text(canvas, "上下滑动查看更多", 180f, 298f, 8.5f, MUTED)
+
+        paint.color = color(PANEL)
+        rect.set(126f, 306f, 234f, 336f)
+        canvas.drawRoundRect(rect, 15f, 15f, paint)
+        text(canvas, "返回主页", 180f, 325f, 11f, TEXT, bold = true)
+    }
+
+    private fun drawTaskRow(
+        canvas: Canvas,
+        centerY: Float,
+        title: String,
+        subtitle: String,
+        rewardOrStatus: String,
+        completed: Boolean
+    ) {
+        paint.color = color(if (completed) 0x2030443C else PANEL)
+        rect.set(42f, centerY - TASK_ROW_CARD_HALF_HEIGHT, 316f, centerY + TASK_ROW_CARD_HALF_HEIGHT)
+        canvas.drawRoundRect(rect, 13f, 13f, paint)
+
+        drawCircle(canvas, 58f, centerY - 1f, 9f, if (completed) MINT else TRACK)
+        if (completed) {
+            text(canvas, "✓", 58f, centerY + 3.5f, 11f, BG, bold = true)
+        } else {
+            drawCircle(canvas, 58f, centerY - 1f, 3f, GOLD)
+        }
+
+        text(canvas, title, 75f, centerY - 2f, 12f, TEXT, bold = true, align = Paint.Align.LEFT)
+        text(canvas, subtitle, 75f, centerY + 15f, 9.2f, MUTED, align = Paint.Align.LEFT)
+        text(
+            canvas,
+            if (completed) "已完成" else rewardOrStatus,
+            305f,
+            centerY + 3f,
+            9.5f,
+            if (completed) MINT else GOLD,
+            bold = completed,
+            align = Paint.Align.RIGHT
+        )
+    }
+
+    private fun drawTaskScrollIndicator(canvas: Canvas) {
+        val top = TASK_VIEWPORT_TOP + 5f
+        val bottom = TASK_VIEWPORT_BOTTOM - 5f
+        val thumbHeight = 42f
+        val travel = (bottom - top - thumbHeight).coerceAtLeast(0f)
+        val maxScroll = maxTaskScroll()
+        val fraction = if (maxScroll <= 0f) 0f else (taskScrollY / maxScroll).coerceIn(0f, 1f)
+        val thumbTop = top + travel * fraction
+
+        paint.color = color(TRACK)
+        rect.set(320f, top, 323f, bottom)
+        canvas.drawRoundRect(rect, 1.5f, 1.5f, paint)
+        paint.color = color(MINT)
+        rect.set(319f, thumbTop, 324f, thumbTop + thumbHeight)
+        canvas.drawRoundRect(rect, 2.5f, 2.5f, paint)
+    }
+
+    private fun todayKeyForView(): String =
+        SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(System.currentTimeMillis()))
+
+    // ---------------------------------------------------------------- pet body
+
+    /** Per-frame pose of the pet, derived purely from the behavior snapshot. */
+    private class PetVisuals(
+        val bodyOffsetY: Float = 0f,
+        val scaleX: Float = 1f,
+        val scaleY: Float = 1f,
+        val rotationDeg: Float = 0f,
+        val eyeMode: EyeMode = EyeMode.OPEN,
+        val mouthOpen: Float = 0f,
+        val leafDroopDeg: Float = 0f,
+        val showHearts: Boolean = false,
+        val showZzz: Boolean = false,
+        val showEvolution: Boolean = false,
+        val showQuestion: Boolean = false
+    )
+
+    private enum class EyeMode { OPEN, BLINK, CLOSED, HAPPY }
+
+    /**
+     * Translate (behavior state, elapsed ms in state) into a pose. Deterministic:
+     * the same snapshot always yields the same pixels — no timers, no randomness.
+     */
+    private fun computeVisuals(): PetVisuals {
+        val machine = behavior ?: return PetVisuals()
+        val t = machine.stateElapsedMs
+        return when (machine.state) {
+            PetBehavior.State.IDLE -> idleVisuals(t)
+            PetBehavior.State.HAPPY -> happyVisuals(t)
+            PetBehavior.State.CURIOUS -> curiousVisuals(t)
+            PetBehavior.State.EVOLVING -> evolutionVisuals(t)
+            PetBehavior.State.SLEEPY -> sleepyVisuals(t)
+            PetBehavior.State.SLEEPING -> sleepingVisuals(t)
+        }
+    }
+
+    /** Idle: gentle sway + bob, a hop every 8–16 s, regular blinking. */
+    private fun idleVisuals(t: Long): PetVisuals {
+        val sway = sin(t / 900.0 * 2.0 * PI)
+        val bob = sin(t / 700.0 * 2.0 * PI)
+        val hop = hopArc(t)
+        return PetVisuals(
+            bodyOffsetY = (bob * 1.2f - hop * 16f).toFloat(),
+            scaleX = (1.0 - bob * 0.012 - hop * 0.05).toFloat(),
+            scaleY = (1.0 + bob * 0.015 + hop * 0.08).toFloat(),
+            rotationDeg = (sway * 2.2).toFloat(),
+            eyeMode = if ((t % 4_300L) in 90L..190L) EyeMode.BLINK else EyeMode.OPEN
+        )
+    }
+
+    /** Happy: three bounces, wiggly tilt, starry eyes, floating hearts. */
+    private fun happyVisuals(t: Long): PetVisuals {
+        val progress = t / HAPPY_MS.toDouble()
+        val bounce = abs(sin(progress * PI * 3.0))
+        val wiggle = sin(t / 130.0 * 2.0 * PI)
+        return PetVisuals(
+            bodyOffsetY = (-bounce * 15.0).toFloat(),
+            scaleX = (1.0 - bounce * 0.05).toFloat(),
+            scaleY = (1.0 + bounce * 0.07).toFloat(),
+            rotationDeg = (wiggle * 1.5).toFloat(),
+            eyeMode = EyeMode.HAPPY,
+            showHearts = t < HEARTS_MS
+        )
+    }
+
+    /** Curious: a small head tilt and a floating question mark. */
+    private fun curiousVisuals(t: Long): PetVisuals {
+        val sway = sin(t / 360.0 * 2.0 * PI)
+        val bob = sin(t / 260.0 * 2.0 * PI)
+        return PetVisuals(
+            bodyOffsetY = (-2.0 + bob * 2.2).toFloat(),
+            scaleX = (1.0 + abs(sway) * 0.018).toFloat(),
+            scaleY = (1.0 + abs(bob) * 0.018).toFloat(),
+            rotationDeg = (-4.0 + sway * 3.0).toFloat(),
+            eyeMode = EyeMode.OPEN,
+            showQuestion = t < QUESTION_MARK_MS
+        )
+    }
+
+    /** Short celebratory pose shown only when XP crosses into a new growth stage. */
+    private fun evolutionVisuals(t: Long): PetVisuals {
+        val progress = (t.toFloat() / PetBehavior.EVOLUTION_MS).coerceIn(0f, 1f)
+        val pulse = sin(progress * PI).toFloat()
+        val bounce = abs(sin(progress * PI * 4.0)).toFloat()
+        return PetVisuals(
+            bodyOffsetY = -bounce * 9f - pulse * 3f,
+            scaleX = 1f + pulse * 0.12f,
+            scaleY = 1f + pulse * 0.16f,
+            rotationDeg = (sin(t / 110.0 * 2.0 * PI) * (1f - progress) * 3f).toFloat(),
+            eyeMode = EyeMode.HAPPY,
+            showEvolution = true
+        )
+    }
+
+    /** Sleepy: slumped posture, slower blink, an occasional yawn, drooping leaf. */
+    private fun sleepyVisuals(t: Long): PetVisuals {
+        val sway = sin(t / 1_600.0 * 2.0 * PI)
+        val yawn = yawnCurve(t)
+        val yawning = yawn > 0f
+        return PetVisuals(
+            bodyOffsetY = 2f,
+            scaleX = 1.02f,
+            scaleY = 0.97f,
+            rotationDeg = (1.8 + sway * 1.0).toFloat(),
+            eyeMode = if (yawning) EyeMode.CLOSED
+            else if ((t % 6_000L) in 200L..420L) EyeMode.BLINK else EyeMode.OPEN,
+            mouthOpen = yawn,
+            leafDroopDeg = 22f
+        )
+    }
+
+    /** Asleep: eyes closed, slow breathing, floating "Zzz". */
+    private fun sleepingVisuals(t: Long): PetVisuals {
+        val breath = sin(t / 3_000.0 * 2.0 * PI)
+        return PetVisuals(
+            bodyOffsetY = (breath * 1.5).toFloat(),
+            scaleX = (1.0 - breath * 0.025).toFloat(),
+            scaleY = (1.0 + breath * 0.045).toFloat(),
+            eyeMode = EyeMode.CLOSED,
+            leafDroopDeg = 30f,
+            showZzz = true
+        )
+    }
+
+    /** 0..1 hop arc; one hop every 8–16 s (pseudo-random per time slot, still deterministic). */
+    private fun hopArc(t: Long): Float {
+        val slot = t / HOP_SLOT_MS
+        val hopStart = slot * HOP_SLOT_MS + (slot.toLong() * 997L % 2_000L)
+        val hopT = t - hopStart
+        return if (hopT in 0L..HOP_DURATION_MS) {
+            sin(hopT / HOP_DURATION_MS.toDouble() * PI).toFloat()
+        } else {
+            0f
+        }
+    }
+
+    /** 0..1 yawn curve; one yawn every ~12–15 s while sleepy. */
+    private fun yawnCurve(t: Long): Float {
+        val slot = t / YAWN_SLOT_MS
+        val yawnStart = slot * YAWN_SLOT_MS + (slot.toLong() * 1_301L % 3_000L)
+        val yawnT = t - yawnStart
+        return if (yawnT in 0L..YAWN_DURATION_MS) {
+            sin(yawnT / YAWN_DURATION_MS.toDouble() * PI).toFloat()
+        } else {
+            0f
+        }
+    }
+
     private fun drawPet(canvas: Canvas) {
-        // Glow and ground shadow.
-        drawCircle(canvas, 180f, 139f, 54f, HALO)
+        val visuals = computeVisuals()
+        val sleeping = behavior?.state == PetBehavior.State.SLEEPING
+        val growthStage = state.evolutionStage
+        val growthScale = when (growthStage) {
+            0 -> 0.80f  // baby: smaller and rounder
+            1 -> 0.93f  // growing: almost full size
+            else -> 1.07f // mature: a little larger
+        }
+
+        // Glow and ground shadow stay outside the body transform.
+        if (!sleeping) drawCircle(canvas, 180f, 139f, 54f, HALO)
         paint.color = color(SHADOW)
         canvas.drawOval(RectF(145f, 179f, 215f, 191f), paint)
+
+        canvas.save()
+        // Pivot at the body center; apply growth scale as well as the current pose.
+        canvas.translate(180f, 150f + visuals.bodyOffsetY)
+        canvas.rotate(visuals.rotationDeg)
+        canvas.scale(visuals.scaleX * growthScale, visuals.scaleY * growthScale)
+        canvas.translate(-180f, -150f)
 
         // Tiny ears behind the body.
         val leftEar = Path().apply {
@@ -142,7 +529,64 @@ class PetView(context: Context) : View(context) {
         paint.color = color(MINT_LIGHT)
         canvas.drawOval(RectF(157f, 157f, 203f, 181f), paint)
 
-        // Little sprout.
+        val stageLeafDroop = visuals.leafDroopDeg + when (growthStage) {
+            0 -> 12f  // the baby leaf is still soft and droopy
+            1 -> 2f
+            else -> -6f // mature leaf stands a little prouder
+        }
+        drawSprout(canvas, stageLeafDroop)
+        if (growthStage >= 2) drawMatureBloom(canvas)
+        drawFace(canvas, visuals)
+        if (visuals.showHearts) drawHappyHearts(canvas)
+        canvas.restore()
+
+        if (visuals.showZzz) drawSleepZzz(canvas)
+        if (visuals.showQuestion) drawCuriosityMark(canvas)
+        if (visuals.showEvolution) drawEvolutionSparkles(canvas, behavior?.stateElapsedMs ?: 0L)
+    }
+
+    /** A tiny blossom is the visual marker of the mature stage. */
+    private fun drawMatureBloom(canvas: Canvas) {
+        val cx = 187f
+        val cy = 101f
+        drawCircle(canvas, cx - 4f, cy, 2.8f, PINK)
+        drawCircle(canvas, cx + 4f, cy, 2.8f, PINK)
+        drawCircle(canvas, cx, cy - 4f, 2.8f, MINT_LIGHT)
+        drawCircle(canvas, cx, cy + 4f, 2.8f, PINK)
+        drawCircle(canvas, cx, cy, 2.1f, GOLD)
+    }
+
+    /** Gold sparkles around the pet during the one-shot evolution celebration. */
+    private fun drawEvolutionSparkles(canvas: Canvas, elapsedMs: Long) {
+        val progress = (elapsedMs.toFloat() / PetBehavior.EVOLUTION_MS).coerceIn(0f, 1f)
+        val alpha = ((1f - progress) * 230f).toInt().coerceIn(0, 230)
+        val drift = sin(elapsedMs / 160.0 * 2.0 * PI).toFloat() * 4f
+        drawSparkle(canvas, 128f, 137f - drift, 7f, GOLD, alpha)
+        drawSparkle(canvas, 232f, 130f + drift, 6f, MINT_LIGHT, alpha)
+        drawSparkle(canvas, 226f, 174f - drift, 5f, PINK, alpha)
+    }
+
+    private fun drawSparkle(canvas: Canvas, cx: Float, cy: Float, radius: Float, colorValue: Int, alpha: Int) {
+        val path = Path().apply {
+            moveTo(cx, cy - radius)
+            lineTo(cx + radius * 0.30f, cy - radius * 0.30f)
+            lineTo(cx + radius, cy)
+            lineTo(cx + radius * 0.30f, cy + radius * 0.30f)
+            lineTo(cx, cy + radius)
+            lineTo(cx - radius * 0.30f, cy + radius * 0.30f)
+            lineTo(cx - radius, cy)
+            lineTo(cx - radius * 0.30f, cy - radius * 0.30f)
+            close()
+        }
+        paint.color = color(colorValue)
+        paint.alpha = alpha
+        canvas.drawPath(path, paint)
+        paint.alpha = 255
+    }
+
+    private fun drawSprout(canvas: Canvas, droopDeg: Float) {
+        canvas.save()
+        canvas.rotate(droopDeg, 178f, 119f) // rotate around the stem base
         val leaf = Path().apply {
             moveTo(179f, 128f)
             quadTo(157f, 108f, 164f, 98f)
@@ -156,35 +600,125 @@ class PetView(context: Context) : View(context) {
         paint.style = Paint.Style.STROKE
         canvas.drawLine(178f, 119f, 169f, 105f, paint)
         paint.style = Paint.Style.FILL
+        canvas.restore()
+    }
 
-        val blink = (SystemClock.uptimeMillis() % 4_300L) in 90L..190L
+    private fun drawFace(canvas: Canvas, visuals: PetVisuals) {
         paint.color = color(FACE)
-        if (blink) {
-            paint.strokeWidth = 2.3f
-            paint.style = Paint.Style.STROKE
-            canvas.drawLine(162f, 148f, 170f, 148f, paint)
-            canvas.drawLine(190f, 148f, 198f, 148f, paint)
-            paint.style = Paint.Style.FILL
-        } else {
-            drawCircle(canvas, 166f, 148f, 3f, FACE)
-            drawCircle(canvas, 194f, 148f, 3f, FACE)
-            drawCircle(canvas, 167f, 147f, 1f, TEXT)
-            drawCircle(canvas, 195f, 147f, 1f, TEXT)
+        when (visuals.eyeMode) {
+            EyeMode.BLINK -> {
+                paint.strokeWidth = 2.3f
+                paint.style = Paint.Style.STROKE
+                paint.strokeCap = Paint.Cap.ROUND
+                canvas.drawLine(162f, 148f, 170f, 148f, paint)
+                canvas.drawLine(190f, 148f, 198f, 148f, paint)
+                paint.strokeCap = Paint.Cap.BUTT
+                paint.style = Paint.Style.FILL
+            }
+            EyeMode.CLOSED -> {
+                // Peaceful closed eyes: gentle downward arcs.
+                paint.strokeWidth = 2f
+                paint.style = Paint.Style.STROKE
+                paint.strokeCap = Paint.Cap.ROUND
+                val left = Path().apply {
+                    moveTo(161f, 145f); quadTo(166f, 152f, 171f, 145f)
+                }
+                val right = Path().apply {
+                    moveTo(189f, 145f); quadTo(194f, 152f, 199f, 145f)
+                }
+                canvas.drawPath(left, paint)
+                canvas.drawPath(right, paint)
+                paint.strokeCap = Paint.Cap.BUTT
+                paint.style = Paint.Style.FILL
+            }
+            EyeMode.HAPPY -> {
+                // Joyful squinting: upward arcs.
+                paint.strokeWidth = 2.2f
+                paint.style = Paint.Style.STROKE
+                paint.strokeCap = Paint.Cap.ROUND
+                val left = Path().apply {
+                    moveTo(161f, 152f); quadTo(166f, 144f, 171f, 152f)
+                }
+                val right = Path().apply {
+                    moveTo(189f, 152f); quadTo(194f, 144f, 199f, 152f)
+                }
+                canvas.drawPath(left, paint)
+                canvas.drawPath(right, paint)
+                paint.strokeCap = Paint.Cap.BUTT
+                paint.style = Paint.Style.FILL
+            }
+            EyeMode.OPEN -> {
+                drawCircle(canvas, 166f, 148f, 3f, FACE)
+                drawCircle(canvas, 194f, 148f, 3f, FACE)
+                drawCircle(canvas, 167f, 147f, 1f, TEXT)
+                drawCircle(canvas, 195f, 147f, 1f, TEXT)
+            }
         }
         drawCircle(canvas, 155f, 157f, 4f, CHEEK)
         drawCircle(canvas, 205f, 157f, 4f, CHEEK)
 
-        val smile = Path().apply {
-            moveTo(174f, 157f)
-            quadTo(180f, 165f, 186f, 157f)
+        if (visuals.mouthOpen > 0.05f) {
+            // Yawning: an open little mouth instead of the smile.
+            val mouthHeight = 11f * visuals.mouthOpen
+            paint.color = color(FACE)
+            canvas.drawOval(RectF(174f, 158f, 186f, 158f + mouthHeight), paint)
+        } else {
+            val smile = Path().apply {
+                moveTo(174f, 157f)
+                quadTo(180f, 165f, 186f, 157f)
+            }
+            paint.color = color(FACE)
+            paint.strokeWidth = 2f
+            paint.strokeCap = Paint.Cap.ROUND
+            paint.style = Paint.Style.STROKE
+            canvas.drawPath(smile, paint)
+            paint.strokeCap = Paint.Cap.BUTT
+            paint.style = Paint.Style.FILL
         }
-        paint.color = color(FACE)
-        paint.strokeWidth = 2f
-        paint.strokeCap = Paint.Cap.ROUND
-        paint.style = Paint.Style.STROKE
-        canvas.drawPath(smile, paint)
-        paint.style = Paint.Style.FILL
     }
+
+    /** Floating hearts while the happy state plays out. */
+    private fun drawHappyHearts(canvas: Canvas) {
+        val t = behavior?.stateElapsedMs ?: return
+        for (i in 0 until 3) {
+            val progress = (t - i * HEART_STAGGER_MS) / 1_000f
+            if (progress < 0f || progress > 1f) continue
+            val hx = 180f + (i - 1) * 26f + sin(progress * 6f) * 8f
+            val hy = 132f - progress * 55f
+            drawHeart(canvas, hx, hy, 6f + progress * 3f, PINK, ((1f - progress) * 220f).toInt())
+        }
+    }
+
+    /** Floating "Zzz" letters while asleep, rising on the breathing rhythm. */
+    private fun drawSleepZzz(canvas: Canvas) {
+        val t = behavior?.stateElapsedMs ?: return
+        for (i in 0 until 3) {
+            val phase = ((t + i * ZZZ_STAGGER_MS) % ZZZ_PERIOD_MS) / ZZZ_PERIOD_MS.toFloat()
+            val zx = 208f + phase * 28f
+            val zy = 148f - phase * 62f
+            text(canvas, "Z", zx, zy, 10f + phase * 5f, MINT_LIGHT, alpha = ((1f - phase) * 200f).toInt())
+        }
+    }
+
+    private fun drawCuriosityMark(canvas: Canvas) {
+        val t = behavior?.stateElapsedMs ?: return
+        val bob = sin(t / 240.0 * 2.0 * PI).toFloat() * 3f
+        val alpha = (255f * (1f - (t / QUESTION_MARK_MS.toFloat()).coerceIn(0f, 1f)))
+            .toInt()
+            .coerceIn(0, 255)
+        text(
+            canvas = canvas,
+            value = "?",
+            x = 226f,
+            y = 105f - bob,
+            size = 20f,
+            colorValue = GOLD,
+            bold = true,
+            alpha = alpha
+        )
+    }
+
+    // ---------------------------------------------------------------- widgets
 
     private fun drawBar(canvas: Canvas, left: Float, y: Float, right: Float, fraction: Float, fillColor: Int) {
         paint.color = color(TRACK)
@@ -222,7 +756,7 @@ class PetView(context: Context) : View(context) {
         text(canvas, label, cx, cy + 39f, 10f, TEXT)
     }
 
-    private fun drawHeart(canvas: Canvas, cx: Float, cy: Float, size: Float, colorValue: Int) {
+    private fun drawHeart(canvas: Canvas, cx: Float, cy: Float, size: Float, colorValue: Int, alpha: Int = 255) {
         val path = Path().apply {
             moveTo(cx, cy + size * 0.8f)
             cubicTo(cx - size * 1.5f, cy - size * 0.1f, cx - size, cy - size, cx - size * 0.35f, cy - size)
@@ -232,8 +766,12 @@ class PetView(context: Context) : View(context) {
             close()
         }
         paint.color = color(colorValue)
+        paint.alpha = alpha
         canvas.drawPath(path, paint)
+        paint.alpha = 255
     }
+
+    // ---------------------------------------------------------------- minigame
 
     private fun drawGame(canvas: Canvas) {
         text(canvas, "卡点挑战", 180f, 39f, 17f, TEXT, bold = true)
@@ -263,7 +801,7 @@ class PetView(context: Context) : View(context) {
         drawCircle(canvas, cx, cy, 6f, MINT_DARK)
 
         val remainingSeconds = ((GAME_LENGTH_MS - elapsed + 999L) / 1_000L).toInt().coerceAtLeast(0)
-        text(canvas, "命中 $gameScore 次    剩余 ${remainingSeconds} 秒", 180f, 270f, 11f, TEXT)
+        text(canvas, "命中 $gameScore 次   剩余 ${remainingSeconds} 秒", 180f, 270f, 11f, TEXT)
         drawBar(canvas, 74f, 283f, 286f, 1f - elapsed.toFloat() / GAME_LENGTH_MS, MINT)
         text(canvas, gameHint, 180f, 303f, 9f, if (gameHint.startsWith("命中")) MINT else MUTED)
 
@@ -275,31 +813,81 @@ class PetView(context: Context) : View(context) {
 
     private fun startGame() {
         mode = Mode.GAME
+        gameElapsedBeforePause = 0L
         gameStartedAt = SystemClock.elapsedRealtime()
         gameScore = 0
         lastHitRound = -1
         gameResultSent = false
-        gameHint = "光点到顶部时点击！"
+        gameHint = "光点到达顶部时点击！"
         invalidate()
     }
 
-    private fun gameElapsed(): Long = if (gameStartedAt == 0L) 0L else SystemClock.elapsedRealtime() - gameStartedAt
+    private fun gameElapsed(): Long {
+        val runningSegment = if (mode == Mode.GAME && isInteractive && gameStartedAt != 0L) {
+            (SystemClock.elapsedRealtime() - gameStartedAt).coerceAtLeast(0L)
+        } else {
+            0L
+        }
+        return (gameElapsedBeforePause + runningSegment).coerceAtLeast(0L)
+    }
+
+    private fun finishGameNormally() {
+        if (mode != Mode.GAME || gameResultSent) return
+        gameResultSent = true
+        mode = Mode.HOME
+        gameStartedAt = 0L
+        listener?.onMiniGameFinished(
+            gameId = "timing",
+            score = gameScore.coerceIn(0, PetState.MAX_GAME_SCORE),
+            completedNormally = true
+        )
+        invalidate()
+    }
 
     private fun finishGameEarly() {
         if (mode != Mode.GAME || gameResultSent) return
         gameResultSent = true
         mode = Mode.HOME
-        listener?.onGameFinished(gameScore)
+        gameStartedAt = 0L
+        listener?.onMiniGameFinished(
+            gameId = "timing",
+            score = gameScore.coerceIn(0, PetState.MAX_GAME_SCORE),
+            completedNormally = false
+        )
         invalidate()
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        if (event.action != MotionEvent.ACTION_UP) return true
         val logicalScale = min(width.toFloat(), height.toFloat()) / DESIGN_SIZE
+        if (logicalScale <= 0f) return true
         val offsetX = (width - DESIGN_SIZE * logicalScale) / 2f
         val offsetY = (height - DESIGN_SIZE * logicalScale) / 2f
         val x = (event.x - offsetX) / logicalScale
         val y = (event.y - offsetY) / logicalScale
+
+        if (event.action == MotionEvent.ACTION_DOWN) {
+            touchDownX = x
+            touchDownY = y
+            return true
+        }
+        if (event.action != MotionEvent.ACTION_UP) return true
+
+        if (mode == Mode.TASKS) {
+            val deltaY = y - touchDownY
+            val deltaX = x - touchDownX
+            val beganInList = touchDownY in TASK_VIEWPORT_TOP..TASK_VIEWPORT_BOTTOM
+            if (beganInList && abs(deltaY) >= TASK_SWIPE_THRESHOLD && abs(deltaY) > abs(deltaX)) {
+                // Swipe up advances to later tasks; swipe down returns to earlier tasks.
+                taskScrollY = (taskScrollY - deltaY).coerceIn(0f, maxTaskScroll())
+                invalidate()
+                return true
+            }
+            if (x in 120f..240f && y in 300f..340f) {
+                mode = Mode.HOME
+                invalidate()
+            }
+            return true
+        }
 
         if (mode == Mode.GAME) {
             if (y in 308f..344f && x in 130f..230f) {
@@ -308,24 +896,49 @@ class PetView(context: Context) : View(context) {
             }
             val elapsed = gameElapsed()
             if (elapsed >= GAME_LENGTH_MS) {
-                finishGameEarly()
+                finishGameNormally()
                 return true
             }
-            val round = (elapsed / ROTATION_MS).toInt()
-            // This is a timing game: the player may tap anywhere on the screen.
-            // A hit is awarded only while the moving dot is inside the top target arc.
+            val round = ((elapsed + ROTATION_MS / 2L) / ROTATION_MS).toInt()
+            // The player can tap anywhere, but only one hit is counted per pass.
             val dotAngle = -PI / 2.0 + (elapsed % ROTATION_MS).toDouble() / ROTATION_MS * 2.0 * PI
             val diff = angleDistance(dotAngle, -PI / 2.0)
             if (diff <= HIT_WINDOW_RADIANS && round != lastHitRound) {
-                gameScore += 1
+                gameScore = (gameScore + 1).coerceAtMost(PetState.MAX_GAME_SCORE)
                 lastHitRound = round
                 gameHint = "命中！很好！"
             } else if (round == lastHitRound) {
-                gameHint = "本圈已经命中啦"
+                gameHint = "本圈已经命中过啦"
             } else {
                 gameHint = "差一点，再试试"
             }
             invalidate()
+            return true
+        }
+
+        // Top-right task button (home only).
+        if (x in 238f..292f && y in 35f..69f) {
+            taskScrollY = 0f
+            mode = Mode.TASKS
+            invalidate()
+            return true
+        }
+
+        // A persisted discovery appears as a small gold coin on the home screen.
+        if (x in 226f..263f && y in 116f..155f &&
+            DailyRewards.hasDiscovery(state, todayKeyForView())) {
+            listener?.onClaimDiscovery()
+            invalidate()
+            return true
+        }
+
+        // Tapping the pet itself: pet while awake, or gently wake it while asleep.
+        if (y in 100f..200f && x in 140f..220f) {
+            if (behavior?.state == PetBehavior.State.SLEEPING) {
+                listener?.onWake()
+            } else {
+                listener?.onPet()
+            }
             return true
         }
 
@@ -346,6 +959,8 @@ class PetView(context: Context) : View(context) {
         return abs(delta)
     }
 
+    // ---------------------------------------------------------------- helpers
+
     private fun text(
         canvas: Canvas,
         value: String,
@@ -354,14 +969,17 @@ class PetView(context: Context) : View(context) {
         size: Float,
         colorValue: Int,
         bold: Boolean = false,
-        align: Paint.Align = Paint.Align.CENTER
+        align: Paint.Align = Paint.Align.CENTER,
+        alpha: Int = 255
     ) {
         paint.style = Paint.Style.FILL
         paint.color = color(colorValue)
         paint.textSize = size
         paint.textAlign = align
         paint.typeface = Typeface.create("sans-serif", if (bold) Typeface.BOLD else Typeface.NORMAL)
+        paint.alpha = alpha
         canvas.drawText(value, x, y, paint)
+        paint.alpha = 255
     }
 
     private fun drawCircle(canvas: Canvas, x: Float, y: Float, radius: Float, colorValue: Int) {
@@ -381,14 +999,34 @@ class PetView(context: Context) : View(context) {
         )
     }
 
-    private enum class Mode { HOME, GAME }
+    private enum class Mode { HOME, GAME, TASKS }
     private enum class Action { FEED, PET, GAME }
 
     private companion object {
         const val DESIGN_SIZE = 360f
         const val GAME_LENGTH_MS = 10_000L
+        const val QUESTION_MARK_MS = 1_700L
+        const val TASK_VIEWPORT_TOP = 65f
+        const val TASK_VIEWPORT_BOTTOM = 284f
+        const val TASK_FIRST_ROW_CENTER = 92f
+        const val TASK_ROW_HEIGHT = 58f
+        const val TASK_ROW_CARD_HALF_HEIGHT = 25f
+        const val TASK_COUNT = 5
+        const val TASK_SWIPE_THRESHOLD = 24f
         const val ROTATION_MS = 1_500L
         const val HIT_WINDOW_RADIANS = 0.27
+
+        /** Behavior animation tuning (all in ms). */
+        const val HAPPY_MS = PetBehavior.HAPPY_MS
+        const val MAX_FRAME_DELTA_MS = 250L
+        const val HEARTS_MS = 1_300L
+        const val HEART_STAGGER_MS = 240L
+        const val HOP_SLOT_MS = 11_000L
+        const val HOP_DURATION_MS = 500L
+        const val YAWN_SLOT_MS = 12_000L
+        const val YAWN_DURATION_MS = 900L
+        const val ZZZ_PERIOD_MS = 2_400L
+        const val ZZZ_STAGGER_MS = 800L
 
         const val BG = 0x0C1114
         const val PANEL = 0x172326
@@ -407,3 +1045,4 @@ class PetView(context: Context) : View(context) {
         const val FACE = 0x193B32
     }
 }
+

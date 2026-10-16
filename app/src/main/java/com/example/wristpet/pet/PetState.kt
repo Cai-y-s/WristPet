@@ -1,73 +1,106 @@
 package com.example.wristpet.pet
 
-import kotlin.math.min
-
-/**
- * Game balance rules for the offline pet MVP.
- * All experience sources share one daily cap so repeated taps or repeated minigames
- * cannot instantly grow the pet to the mature stage.
- */
+/** Persisted pet attributes and game-balance rules. */
 data class PetState(
     val affection: Int = 8,
     val hunger: Int = 78,
     val exp: Int = 0,
     val coins: Int = 0,
-    /** Time anchor used for offline hunger decay; preserves unused partial hours. */
+    /** Anchor for offline hunger decay; keeps partial 20-minute intervals. */
     val lastUpdatedAt: Long = System.currentTimeMillis(),
-    /** Experience earned during expDay, across feeding, petting, and minigames. */
+    /** XP earned from all sources during expDay. */
     val dailyExpEarned: Int = 0,
-    /** Local calendar day key in yyyy-MM-dd format. */
+    /** Local calendar day in yyyy-MM-dd format. */
     val expDay: String = "",
-    /** Last accepted petting action, used for a persistent cooldown. */
-    val lastPettedAt: Long = 0L
+    /** Persisted petting cooldown. */
+    val lastPettedAt: Long = 0L,
+    // Daily task completion keys. Empty means the task has not been completed yet.
+    val dailyVisitDay: String = "",
+    val dailyFeedDay: String = "",
+    val dailyPetDay: String = "",
+    val dailyGameDay: String = "",
+    // A random discovery is rolled once per day and persisted.
+    val discoveryDay: String = "",
+    val discoveryCoins: Int = 0,
+    val discoveryClaimedDay: String = "",
+    // Coins earned from minigame scores are capped independently from task bonuses.
+    val gameCoinDay: String = "",
+    val dailyGameCoinsEarned: Int = 0
 ) {
     val level: Int
         get() = (exp / 20 + 1).coerceIn(1, 99)
 
-    val stage: String
+    /** Stable numeric stage ID: 0 = baby, 1 = growing, 2 = mature. */
+    val evolutionStage: Int
         get() = when {
-            level <= 2 -> "幼年"
-            level <= 4 -> "成长中"
+            level <= 2 -> 0
+            level <= 4 -> 1
+            else -> 2
+        }
+
+    val stage: String
+        get() = when (evolutionStage) {
+            0 -> "幼年"
+            1 -> "成长期"
             else -> "成熟"
         }
 
-    fun forDay(dayKey: String): PetState = if (expDay == dayKey) {
-        copy(dailyExpEarned = dailyExpEarned.coerceIn(0, MAX_DAILY_EXP))
-    } else {
-        copy(dailyExpEarned = 0, expDay = dayKey)
+    fun forDay(dayKey: String): PetState {
+        val xpToday = if (expDay == dayKey) dailyExpEarned.coerceIn(0, MAX_DAILY_EXP) else 0
+        val gameCoinsToday = if (gameCoinDay == dayKey) {
+            dailyGameCoinsEarned.coerceIn(0, MAX_DAILY_GAME_COINS)
+        } else 0
+        return copy(
+            dailyExpEarned = xpToday,
+            expDay = dayKey,
+            dailyGameCoinsEarned = gameCoinsToday,
+            gameCoinDay = dayKey
+        )
     }
 
-    /** A full pet receives no additional feeding reward until hunger falls below the threshold. */
     fun canFeed(): Boolean = hunger < FEED_HUNGER_LIMIT
 
-    fun canPet(now: Long): Boolean =
-        affection < 100 && (lastPettedAt <= 0L || now - lastPettedAt >= PET_COOLDOWN_MS)
+    fun canPet(now: Long): Boolean = affection < 100 &&
+        (lastPettedAt <= 0L || (now >= lastPettedAt && now - lastPettedAt >= PET_COOLDOWN_MS))
 
     fun fed(dayKey: String): PetState {
         val base = forDay(dayKey)
         if (!base.canFeed()) return base
-        return base.copy(hunger = (base.hunger + 28).coerceAtMost(100))
+        return base.copy(hunger = (base.hunger + FEED_AMOUNT).coerceAtMost(100))
             .withExperience(1, dayKey)
     }
 
     fun petted(now: Long, dayKey: String): PetState {
         val base = forDay(dayKey)
         if (!base.canPet(now)) return base
-        val newAffection = (base.affection + 4).coerceAtMost(100)
-        val actualAffectionGain = newAffection > base.affection
         return base.copy(
-            affection = newAffection,
+            affection = (base.affection + PET_AFFECTION_AMOUNT).coerceAtMost(100),
             lastPettedAt = now
-        ).withExperience(if (actualAffectionGain) 1 else 0, dayKey)
+        ).withExperience(1, dayKey)
     }
 
+    /**
+     * Standard minigame reward contract: score is normalized to 0..MAX_GAME_SCORE.
+     * Score-derived coins are capped at MAX_DAILY_GAME_COINS/day; daily task bonuses
+     * are paid separately by DailyRewards.
+     */
     fun rewarded(score: Int, dayKey: String): PetState {
         val base = forDay(dayKey)
-        val safeScore = score.coerceAtLeast(0)
+        val safeScore = score.coerceIn(0, MAX_GAME_SCORE)
+        val remainingDailyCoins = (MAX_DAILY_GAME_COINS - base.dailyGameCoinsEarned).coerceAtLeast(0)
+        val remainingWallet = (MAX_COINS - base.coins).coerceAtLeast(0)
+        val coinGrant = minOf(safeScore, remainingDailyCoins, remainingWallet)
+        val expReward = when {
+            safeScore >= 4 -> 2
+            safeScore > 0 -> 1
+            else -> 0
+        }
         return base.copy(
-            coins = (base.coins + safeScore).coerceAtMost(99999),
-            affection = (base.affection + min(5, safeScore)).coerceAtMost(100)
-        ).withExperience(safeScore * 2, dayKey)
+            coins = (base.coins + coinGrant).coerceAtMost(MAX_COINS),
+            gameCoinDay = dayKey,
+            dailyGameCoinsEarned = (base.dailyGameCoinsEarned + coinGrant)
+                .coerceIn(0, MAX_DAILY_GAME_COINS)
+        ).withExperience(expReward, dayKey)
     }
 
     private fun withExperience(requested: Int, dayKey: String): PetState {
@@ -82,10 +115,14 @@ data class PetState(
     }
 
     companion object {
-        /** Eight experience points/day means reaching the first mature stage takes at least 10 days. */
         const val MAX_DAILY_EXP = 8
         const val MAX_TOTAL_EXP = 1980
+        const val MAX_GAME_SCORE = 7
+        const val MAX_COINS = 99999
+        const val MAX_DAILY_GAME_COINS = 12
         const val FEED_HUNGER_LIMIT = 85
+        const val FEED_AMOUNT = 28
+        const val PET_AFFECTION_AMOUNT = 4
         const val PET_COOLDOWN_MS = 60_000L
     }
 }
