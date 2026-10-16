@@ -91,8 +91,9 @@ class MainActivity : Activity(), PetView.Listener {
         val now = System.currentTimeMillis()
         val today = todayKey(now)
         val fresh = currentState(now)
+        val petName = ShopCatalog.petName(fresh.activePetId)
         if (fresh.affection >= 100) {
-            publish(fresh, "小芽已经被你摸得超开心啦！")
+            publish(fresh, "${petName}已经被你摸得超开心啦！")
             return
         }
         if (!fresh.canPet(now)) {
@@ -104,8 +105,8 @@ class MainActivity : Activity(), PetView.Listener {
         behavior.onInteraction()
         publish(
             task.state,
-            if (task.coinsAwarded > 0) "小芽超喜欢你！每日照顾 +${task.coinsAwarded} 金币"
-            else "小芽超喜欢你！"
+            if (task.coinsAwarded > 0) "${petName}超喜欢你！每日照顾 +${task.coinsAwarded} 金币"
+            else "${petName}超喜欢你！"
         )
     }
 
@@ -187,9 +188,10 @@ class MainActivity : Activity(), PetView.Listener {
         petView.setPetState(petState)
         if (evolved) {
             behavior.onEvolution()
+            val petName = ShopCatalog.petName(petState.activePetId)
             val evolutionMessage = when (petState.evolutionStage) {
-                1 -> "小芽长大了一点！进入成长期啦！"
-                2 -> "进化成功！小芽成熟啦！"
+                1 -> "${petName}长大了一点！进入成长期啦！"
+                2 -> "进化成功！${petName}成熟啦！"
                 else -> message
             }
             petView.setNotice(evolutionMessage, PetBehavior.EVOLUTION_MS)

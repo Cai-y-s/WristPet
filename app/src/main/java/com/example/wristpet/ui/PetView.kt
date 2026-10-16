@@ -269,8 +269,8 @@ class PetView(context: Context) : View(context) {
 
         val rows = listOf(
             TaskRowData("每日拜访", "今天首次打开应用", "+3 金币", DailyRewards.isClaimed(state, DailyTask.VISIT, today)),
-            TaskRowData("喂食小芽", "首次有效喂食", "+2 金币", DailyRewards.isClaimed(state, DailyTask.FEED, today)),
-            TaskRowData("摸摸小芽", "首次有效摸摸", "+2 金币", DailyRewards.isClaimed(state, DailyTask.PET, today)),
+            TaskRowData("喂食${ShopCatalog.petName(state.activePetId)}", "首次有效喂食", "+2 金币", DailyRewards.isClaimed(state, DailyTask.FEED, today)),
+            TaskRowData("摸摸${ShopCatalog.petName(state.activePetId)}", "首次有效摸摸", "+2 金币", DailyRewards.isClaimed(state, DailyTask.PET, today)),
             TaskRowData("陪它玩耍", "完整完成一局小游戏", "+3 金币", DailyRewards.isClaimed(state, DailyTask.GAME, today)),
             TaskRowData(
                 "随机发现",
@@ -504,6 +504,29 @@ class PetView(context: Context) : View(context) {
                 canvas.drawPath(q, paint)
                 drawCircle(canvas, cx, cy + 4f, 9f, 0xC8C6FF)
             }
+            "fuxing" -> {
+                // Tiny orange tabby portrait with the signature blue ID badge.
+                val leftEar = Path().apply {
+                    moveTo(cx - 9f, cy - 1f); lineTo(cx - 8f, cy - 12f); lineTo(cx - 1f, cy - 5f); close()
+                }
+                val rightEar = Path().apply {
+                    moveTo(cx + 1f, cy - 5f); lineTo(cx + 8f, cy - 12f); lineTo(cx + 9f, cy - 1f); close()
+                }
+                paint.color = color(FUXING_ORANGE)
+                canvas.drawPath(leftEar, paint)
+                canvas.drawPath(rightEar, paint)
+                drawCircle(canvas, cx, cy + 1f, 9f, FUXING_ORANGE)
+                drawCircle(canvas, cx, cy + 4f, 5f, FUXING_CREAM)
+                drawCircle(canvas, cx - 3f, cy, 1.1f, FACE)
+                drawCircle(canvas, cx + 3f, cy, 1.1f, FACE)
+                paint.color = color(FUXING_COLLAR)
+                rect.set(cx - 3f, cy + 7f, cx + 3f, cy + 10f)
+                canvas.drawRoundRect(rect, 1f, 1f, paint)
+                paint.color = color(FUXING_BADGE_BLUE)
+                rect.set(cx - 4f, cy + 9f, cx + 4f, cy + 15f)
+                canvas.drawRoundRect(rect, 1f, 1f, paint)
+                drawCircle(canvas, cx, cy + 11.5f, 1.8f, FUXING_ORANGE)
+            }
             else -> {
                 drawCircle(canvas, cx, cy + 1f, 9f, MINT)
                 drawCircle(canvas, cx + 1f, cy - 8f, 4f, LEAF)
@@ -702,11 +725,15 @@ class PetView(context: Context) : View(context) {
             "bunny" -> drawBunnyBase(canvas)
             "fox" -> drawFoxBase(canvas)
             "cat" -> drawCatBase(canvas)
+            "fuxing" -> drawFuxingBase(canvas)
             else -> drawSproutBase(canvas, visuals, growthStage)
         }
         drawFace(canvas, visuals)
+        if (state.activePetId == "fuxing") drawFuxingFaceDetails(canvas)
         drawAccessory(canvas, state.equippedAccessoryId)
-        if (growthStage >= 2 && state.activePetId != ShopCatalog.STARTER_PET_ID) {
+        // Keep the signature ID badge visible even when an accessory is equipped.
+        if (state.activePetId == "fuxing") drawFuxingIdBadge(canvas)
+        if (growthStage >= 2 && state.activePetId != ShopCatalog.STARTER_PET_ID && state.activePetId != "fuxing") {
             drawMatureBloom(canvas)
         }
         if (visuals.showHearts) drawHappyHearts(canvas)
@@ -810,6 +837,141 @@ class PetView(context: Context) : View(context) {
         canvas.drawPath(tail, paint)
         paint.style = Paint.Style.FILL
         paint.strokeCap = Paint.Cap.BUTT
+    }
+
+    /**
+     * A custom orange tabby inspired by Fuxing's photo. The eyes still use the shared
+     * PetVisuals renderer, so happy/curious/sleepy/sleeping expressions keep working.
+     */
+    private fun drawFuxingBase(canvas: Canvas) {
+        // Curled striped tail behind the body.
+        val tail = Path().apply {
+            moveTo(207f, 164f)
+            quadTo(230f, 170f, 226f, 185f)
+            quadTo(224f, 194f, 214f, 189f)
+        }
+        paint.style = Paint.Style.STROKE
+        paint.strokeCap = Paint.Cap.ROUND
+        paint.strokeWidth = 10f
+        paint.color = color(FUXING_DARK)
+        canvas.drawPath(tail, paint)
+        paint.strokeWidth = 4f
+        paint.color = color(FUXING_LIGHT)
+        canvas.drawPath(tail, paint)
+        paint.style = Paint.Style.FILL
+        paint.strokeCap = Paint.Cap.BUTT
+
+        // Pointed ears with warm pink inner ears.
+        val leftEar = Path().apply {
+            moveTo(145f, 139f); lineTo(149f, 109f); lineTo(173f, 133f); close()
+        }
+        val rightEar = Path().apply {
+            moveTo(187f, 133f); lineTo(211f, 109f); lineTo(215f, 140f); close()
+        }
+        paint.color = color(FUXING_ORANGE)
+        canvas.drawPath(leftEar, paint)
+        canvas.drawPath(rightEar, paint)
+        paint.color = color(FUXING_PINK)
+        val leftInner = Path().apply {
+            moveTo(151f, 132f); lineTo(153f, 117f); lineTo(166f, 133f); close()
+        }
+        val rightInner = Path().apply {
+            moveTo(194f, 133f); lineTo(207f, 117f); lineTo(209f, 133f); close()
+        }
+        canvas.drawPath(leftInner, paint)
+        canvas.drawPath(rightInner, paint)
+
+        // Rounded orange body, pale muzzle/chest and two tiny paws.
+        paint.color = color(FUXING_ORANGE)
+        canvas.drawRoundRect(RectF(142f, 121f, 218f, 187f), 25f, 25f, paint)
+        paint.color = color(FUXING_CREAM)
+        canvas.drawOval(RectF(155f, 151f, 205f, 178f), paint)
+        canvas.drawOval(RectF(151f, 174f, 178f, 191f), paint)
+        canvas.drawOval(RectF(182f, 174f, 209f, 191f), paint)
+
+        // Signature orange-tabby forehead and cheek stripes.
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 3f
+        paint.strokeCap = Paint.Cap.ROUND
+        paint.color = color(FUXING_DARK)
+        val stripe1 = Path().apply { moveTo(163f, 125f); quadTo(166f, 132f, 166f, 138f) }
+        val stripe2 = Path().apply { moveTo(180f, 122f); quadTo(180f, 131f, 180f, 139f) }
+        val stripe3 = Path().apply { moveTo(197f, 125f); quadTo(194f, 132f, 194f, 138f) }
+        canvas.drawPath(stripe1, paint)
+        canvas.drawPath(stripe2, paint)
+        canvas.drawPath(stripe3, paint)
+        canvas.drawLine(147f, 151f, 155f, 154f, paint)
+        canvas.drawLine(147f, 158f, 154f, 159f, paint)
+        canvas.drawLine(205f, 154f, 213f, 151f, paint)
+        canvas.drawLine(206f, 159f, 213f, 158f, paint)
+        paint.style = Paint.Style.FILL
+        paint.strokeCap = Paint.Cap.BUTT
+
+        // Silver collar and the strap that leads to Fuxing's ID badge.
+        val collar = Path().apply {
+            moveTo(149f, 165f); quadTo(180f, 176f, 211f, 165f)
+            lineTo(208f, 173f); quadTo(180f, 184f, 152f, 173f); close()
+        }
+        paint.color = color(FUXING_COLLAR)
+        canvas.drawPath(collar, paint)
+        paint.color = color(0x697781)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1.2f
+        canvas.drawLine(155f, 170f, 205f, 170f, paint)
+        paint.style = Paint.Style.FILL
+        paint.color = color(FUXING_LIGHT)
+        canvas.drawLine(180f, 172f, 180f, 180f, paint)
+    }
+
+    /** Pink nose and whiskers are drawn after the shared expressive face. */
+    private fun drawFuxingFaceDetails(canvas: Canvas) {
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1.15f
+        paint.strokeCap = Paint.Cap.ROUND
+        paint.color = color(FUXING_CREAM)
+        canvas.drawLine(153f, 156f, 137f, 151f, paint)
+        canvas.drawLine(153f, 160f, 136f, 160f, paint)
+        canvas.drawLine(154f, 164f, 140f, 168f, paint)
+        canvas.drawLine(207f, 156f, 223f, 151f, paint)
+        canvas.drawLine(207f, 160f, 224f, 160f, paint)
+        canvas.drawLine(206f, 164f, 220f, 168f, paint)
+        paint.style = Paint.Style.FILL
+        paint.strokeCap = Paint.Cap.BUTT
+        val nose = Path().apply {
+            moveTo(176.5f, 153f); quadTo(180f, 151f, 183.5f, 153f)
+            lineTo(180f, 157f); close()
+        }
+        paint.color = color(FUXING_PINK)
+        canvas.drawPath(nose, paint)
+    }
+
+    /** The little blue-framed portrait badge is Fuxing's signature detail. */
+    private fun drawFuxingIdBadge(canvas: Canvas) {
+        paint.color = color(FUXING_COLLAR)
+        rect.set(169f, 177f, 191f, 200f)
+        canvas.drawRoundRect(rect, 3f, 3f, paint)
+        paint.color = color(0x697781)
+        rect.set(171f, 178.5f, 189f, 198.5f)
+        canvas.drawRoundRect(rect, 2f, 2f, paint)
+        paint.color = color(FUXING_BADGE_BLUE)
+        rect.set(172.5f, 180f, 187.5f, 194.5f)
+        canvas.drawRoundRect(rect, 1.5f, 1.5f, paint)
+        // Tiny portrait in the badge: ears, orange face and a cream muzzle.
+        val leftEar = Path().apply {
+            moveTo(176f, 186f); lineTo(176.5f, 182.5f); lineTo(179f, 185f); close()
+        }
+        val rightEar = Path().apply {
+            moveTo(181f, 185f); lineTo(183.5f, 182.5f); lineTo(184f, 186f); close()
+        }
+        paint.color = color(FUXING_ORANGE)
+        canvas.drawPath(leftEar, paint)
+        canvas.drawPath(rightEar, paint)
+        rect.set(176f, 184.5f, 184f, 191.5f)
+        canvas.drawRoundRect(rect, 2.5f, 2.5f, paint)
+        paint.color = color(FUXING_CREAM)
+        canvas.drawOval(RectF(177.2f, 188f, 182.8f, 191.2f), paint)
+        drawCircle(canvas, 178.2f, 187.5f, 0.65f, FACE)
+        drawCircle(canvas, 181.8f, 187.5f, 0.65f, FACE)
     }
 
     private fun drawAccessory(canvas: Canvas, id: String) {
@@ -1391,6 +1553,13 @@ class PetView(context: Context) : View(context) {
         const val HALO = 0x203C8F6A
         const val SHADOW = 0x263C8F6A
         const val FACE = 0x193B32
+        const val FUXING_ORANGE = 0xE99A45
+        const val FUXING_LIGHT = 0xF6B75F
+        const val FUXING_DARK = 0xB7682D
+        const val FUXING_CREAM = 0xFFF0D8
+        const val FUXING_PINK = 0xEFA2B8
+        const val FUXING_COLLAR = 0xB9C0C8
+        const val FUXING_BADGE_BLUE = 0x477EC6
     }
 }
 

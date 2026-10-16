@@ -36,7 +36,8 @@ object ShopCatalog {
         ShopItem("sprout", "小芽", "最初的绿色伙伴", 0, ShopItemType.PET),
         ShopItem("bunny", "棉棉兔", "长耳朵的温柔伙伴", 120, ShopItemType.PET),
         ShopItem("fox", "橘尾狐", "活泼的橘色小狐狸", 180, ShopItemType.PET),
-        ShopItem("cat", "月光猫", "安静的紫色小猫", 220, ShopItemType.PET)
+        ShopItem("cat", "月光猫", "安静的紫色小猫", 220, ShopItemType.PET),
+        ShopItem("fuxing", "福星", "戴着工牌的橘猫伙伴", 260, ShopItemType.PET)
     )
 
     fun items(type: ShopItemType): List<ShopItem> = when (type) {
