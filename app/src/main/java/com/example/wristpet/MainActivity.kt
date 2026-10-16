@@ -134,6 +134,7 @@ class MainActivity : Activity(), PetView.Listener {
             "timing" -> "卡点挑战"
             "cat_paw" -> "猫爪快拍"
             "fuxing_catch" -> "福星接金币"
+            "fuxing_jump" -> "福星跳跳"
             else -> "小游戏"
         }
         val parts = mutableListOf("${gameName}结束！游戏金币 +${scoreCoins}")

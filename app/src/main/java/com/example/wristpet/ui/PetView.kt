@@ -119,6 +119,23 @@ class PetView(context: Context) : View(context) {
     private var fuxingNextSpawnAt = 0L
     private var fuxingLastUpdateAt = 0L
 
+    // Fuxing Jump: side-scrolling obstacle course. The mini-game uses the shared
+    // game clock, so it pauses naturally when the watch app goes to the background.
+    private data class JumpingObject(
+        val id: Long,
+        var x: Float,
+        val kind: JumpingKind,
+        val speed: Float
+    )
+    private enum class JumpingKind { BOX, YARN, COIN, FISH }
+    private val fuxingJumpObjects = mutableListOf<JumpingObject>()
+    private var fuxingJumpRawScore = 0
+    private var fuxingJumpHint = "轻点跳跃，越过障碍并收集奖励！"
+    private var fuxingJumpStartedAt = -FUXING_JUMP_DURATION_MS
+    private var fuxingJumpNextSpawnAt = 0L
+    private var fuxingJumpLastElapsed = 0L
+    private var fuxingJumpNextId = 1L
+
     /** Wall-clock anchor used to compute frame deltas for the behavior machine. */
     private var lastFrameAt = 0L
 
@@ -135,6 +152,7 @@ class PetView(context: Context) : View(context) {
                     when (mode) {
                         Mode.CAT_PAW -> updateCatPawTarget()
                         Mode.FUXING_CATCH -> updateFuxingCatch()
+                        Mode.FUXING_JUMP -> updateFuxingJump()
                         else -> Unit
                     }
                 }
@@ -203,10 +221,12 @@ class PetView(context: Context) : View(context) {
         if (active) {
             if (isTimedGameMode() && gameStartedAt == 0L) gameStartedAt = now
             if (mode == Mode.FUXING_CATCH) fuxingLastUpdateAt = now
+            if (mode == Mode.FUXING_JUMP) fuxingJumpLastElapsed = gameElapsed()
             lastFrameAt = now
             handler.post(ticker)
         } else {
             if (mode == Mode.FUXING_CATCH) fuxingLastUpdateAt = 0L
+            if (mode == Mode.FUXING_JUMP) fuxingJumpLastElapsed = gameElapsedBeforePause
             lastFrameAt = 0L
         }
     }
@@ -223,7 +243,7 @@ class PetView(context: Context) : View(context) {
 
     /** Lively states animate fast; sleepy states slow down to save battery. */
     private fun frameIntervalMs(): Long = when (mode) {
-        Mode.GAME, Mode.CAT_PAW, Mode.FUXING_CATCH -> 45L
+        Mode.GAME, Mode.CAT_PAW, Mode.FUXING_CATCH, Mode.FUXING_JUMP -> 45L
         Mode.GAME_MENU -> 500L
         // Detail pages are static; active drag/fling events redraw them independently.
         Mode.TASKS -> 1_000L
@@ -254,6 +274,7 @@ class PetView(context: Context) : View(context) {
             Mode.GAME -> drawGame(canvas)
             Mode.CAT_PAW -> drawCatPawGame(canvas)
             Mode.FUXING_CATCH -> drawFuxingCatchGame(canvas)
+            Mode.FUXING_JUMP -> drawFuxingJumpGame(canvas)
             Mode.TASKS -> drawDailyTasks(canvas)
             Mode.SHOP -> drawShop(canvas)
         }
@@ -1298,51 +1319,65 @@ class PetView(context: Context) : View(context) {
     // ---------------------------------------------------------------- minigame selector + games
 
     private fun drawGameMenu(canvas: Canvas) {
-        text(canvas, "选择小游戏", 180f, 34f, 17f, TEXT, bold = true)
-        text(canvas, "玩一局，赚金币！", 180f, 52f, 10f, MUTED)
+        text(canvas, "选择小游戏", 180f, 31f, 17f, TEXT, bold = true)
+        text(canvas, "玩一局，赚金币！", 180f, 48f, 9.5f, MUTED)
 
-        // Three compact cards sized for the round watch display.
-        paint.color = color(PANEL)
-        rect.set(48f, 64f, 312f, 130f)
-        canvas.drawRoundRect(rect, 14f, 14f, paint)
-        paint.color = color(TRACK)
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = 4.5f
-        canvas.drawCircle(80f, 95f, 17f, paint)
-        paint.style = Paint.Style.FILL
-        paint.color = color(MINT)
-        rect.set(63f, 79f, 97f, 113f)
-        canvas.drawArc(rect, -110f, 38f, false, paint)
-        drawCircle(canvas, 80f, 78f, 4f, GOLD)
-        text(canvas, "卡点挑战", 108f, 89f, 12f, TEXT, bold = true, align = Paint.Align.LEFT)
-        text(canvas, "抓准光点经过亮区的时机", 108f, 107f, 8.5f, MUTED, align = Paint.Align.LEFT)
-        text(canvas, "10 秒", 286f, 121f, 8.5f, MINT, bold = true)
+        // Four compact touch-friendly rows fit inside the round display.
+        drawMiniGameCard(canvas, 56f, 108f, "卡点挑战", "抓准光点经过亮区的时机", "10 秒", 0)
+        drawMiniGameCard(canvas, 112f, 164f, "猫爪快拍", "点击金币和鱼干，避开炸弹", "20 秒", 1)
+        drawMiniGameCard(canvas, 168f, 220f, "福星接金币", "左右滑动，接金币鱼干躲石头", "30 秒", 2)
+        drawMiniGameCard(canvas, 224f, 276f, "福星跳跳", "轻点跳跃，越过障碍收集奖励", "30 秒", 3)
 
         paint.color = color(PANEL)
-        rect.set(48f, 137f, 312f, 203f)
-        canvas.drawRoundRect(rect, 14f, 14f, paint)
-        drawCircle(canvas, 80f, 169f, 19f, 0x254B8068)
-        drawCircle(canvas, 73f, 163f, 4.5f, PINK)
-        drawCircle(canvas, 85f, 163f, 4.5f, PINK)
-        drawCircle(canvas, 70f, 174f, 4.5f, PINK)
-        drawCircle(canvas, 82f, 174f, 4.5f, PINK)
-        drawCircle(canvas, 78f, 169f, 6f, MINT_LIGHT)
-        text(canvas, "猫爪快拍", 108f, 163f, 12f, TEXT, bold = true, align = Paint.Align.LEFT)
-        text(canvas, "点击金币和鱼干，避开炸弹", 108f, 181f, 8.5f, MUTED, align = Paint.Align.LEFT)
-        text(canvas, "20 秒", 286f, 194f, 8.5f, GOLD, bold = true)
-
-        paint.color = color(PANEL)
-        rect.set(48f, 210f, 312f, 276f)
-        canvas.drawRoundRect(rect, 14f, 14f, paint)
-        drawFuxingMiniIcon(canvas, 80f, 241f)
-        text(canvas, "福星接金币", 108f, 236f, 12f, TEXT, bold = true, align = Paint.Align.LEFT)
-        text(canvas, "左右滑动，接金币鱼干躲石头", 108f, 254f, 8.5f, MUTED, align = Paint.Align.LEFT)
-        text(canvas, "30 秒", 286f, 267f, 8.5f, GOLD, bold = true)
-
-        paint.color = color(PANEL)
-        rect.set(126f, 305f, 234f, 335f)
+        rect.set(126f, 304f, 234f, 334f)
         canvas.drawRoundRect(rect, 15f, 15f, paint)
-        text(canvas, "返回主页", 180f, 324f, 11f, TEXT, bold = true)
+        text(canvas, "返回主页", 180f, 323f, 11f, TEXT, bold = true)
+    }
+
+    private fun drawMiniGameCard(
+        canvas: Canvas,
+        top: Float,
+        bottom: Float,
+        title: String,
+        subtitle: String,
+        duration: String,
+        iconType: Int
+    ) {
+        paint.color = color(PANEL)
+        rect.set(47f, top, 313f, bottom)
+        canvas.drawRoundRect(rect, 12f, 12f, paint)
+        val cy = (top + bottom) / 2f
+        when (iconType) {
+            0 -> {
+                paint.color = color(TRACK)
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = 3.2f
+                canvas.drawCircle(74f, cy, 13f, paint)
+                paint.style = Paint.Style.FILL
+                paint.color = color(MINT)
+                canvas.drawArc(RectF(61f, cy - 13f, 87f, cy + 13f), -110f, 38f, false, paint)
+                drawCircle(canvas, 74f, cy - 14f, 3.3f, GOLD)
+            }
+            1 -> {
+                drawCircle(canvas, 74f, cy, 15f, 0x254B8068)
+                drawCircle(canvas, 69f, cy - 3f, 4f, PINK)
+                drawCircle(canvas, 78f, cy - 3f, 4f, MINT_LIGHT)
+                drawCircle(canvas, 74f, cy + 4f, 5f, GOLD)
+            }
+            2 -> drawFuxingMiniIcon(canvas, 74f, cy)
+            else -> {
+                drawFuxingMiniIcon(canvas, 74f, cy - 1f)
+                // A small golden arc hints at the jump action.
+                paint.color = color(GOLD)
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = 2f
+                canvas.drawArc(RectF(56f, cy - 22f, 92f, cy + 6f), 205f, 115f, false, paint)
+                paint.style = Paint.Style.FILL
+            }
+        }
+        text(canvas, title, 99f, cy - 4f, 11.5f, TEXT, bold = true, align = Paint.Align.LEFT)
+        text(canvas, subtitle, 99f, cy + 12f, 8.1f, MUTED, align = Paint.Align.LEFT)
+        text(canvas, duration, 291f, cy + 1f, 8.2f, if (iconType == 0) MINT else GOLD, bold = true, align = Paint.Align.RIGHT)
     }
 
     private fun drawFuxingMiniIcon(canvas: Canvas, cx: Float, cy: Float) {
@@ -1606,6 +1641,237 @@ class PetView(context: Context) : View(context) {
         invalidate()
     }
 
+    // ---------------------------------------------------------------- Fuxing Jump
+
+    private fun drawFuxingJumpGame(canvas: Canvas) {
+        val elapsed = gameElapsed().coerceAtMost(FUXING_JUMP_GAME_LENGTH_MS)
+        val remaining = ((FUXING_JUMP_GAME_LENGTH_MS - elapsed + 999L) / 1_000L)
+            .toInt().coerceAtLeast(0)
+        text(canvas, "福星跳跳", 180f, 32f, 16f, TEXT, bold = true)
+        text(canvas, "轻点跳跃，越过纸箱和毛线球！", 180f, 51f, 9.5f, MUTED)
+
+        // Background dashes create a subtle sense of forward movement.
+        val dashPhase = ((elapsed / 85L) % 48L).toFloat()
+        for (i in 0..5) {
+            val dx = 42f + i * 54f - dashPhase
+            if (dx in 26f..334f) drawCircle(canvas, dx, 91f + (i % 2) * 14f, 1.4f, TRACK)
+        }
+
+        // Ground plane stays below all collectibles and the runner.
+        paint.color = color(TRACK)
+        rect.set(36f, FUXING_JUMP_GROUND_Y, 324f, FUXING_JUMP_GROUND_Y + 3f)
+        canvas.drawRoundRect(rect, 1.5f, 1.5f, paint)
+        for (i in 0..7) {
+            val dx = 42f + i * 42f - ((elapsed / 50L) % 42L).toFloat()
+            if (dx in 36f..324f) {
+                paint.color = color(TRACK)
+                rect.set(dx, FUXING_JUMP_GROUND_Y + 8f, dx + 12f, FUXING_JUMP_GROUND_Y + 10f)
+                canvas.drawRoundRect(rect, 1f, 1f, paint)
+            }
+        }
+
+        fuxingJumpObjects.forEach { drawFuxingJumpObject(canvas, it) }
+        drawFuxingJumpRunner(canvas, jumpHeightAt(elapsed))
+
+        text(canvas, "得分 $fuxingJumpRawScore", 112f, 280f, 11f, TEXT, bold = true)
+        text(canvas, "剩余 ${remaining} 秒", 248f, 280f, 10f, MUTED)
+        drawBar(canvas, 78f, 290f, 282f, 1f - elapsed.toFloat() / FUXING_JUMP_GAME_LENGTH_MS, GOLD)
+        text(
+            canvas,
+            fuxingJumpHint,
+            180f,
+            307f,
+            8.8f,
+            if (fuxingJumpHint.contains("接住") || fuxingJumpHint.contains("躲开") || fuxingJumpHint.contains("跳起来")) MINT else MUTED
+        )
+        paint.color = color(PANEL)
+        rect.set(139f, 315f, 221f, 339f)
+        canvas.drawRoundRect(rect, 12f, 12f, paint)
+        text(canvas, "结束", 180f, 331f, 10f, TEXT)
+    }
+
+    private fun drawFuxingJumpObject(canvas: Canvas, item: JumpingObject) {
+        when (item.kind) {
+            JumpingKind.BOX -> {
+                val top = FUXING_JUMP_GROUND_Y - 25f
+                paint.color = color(0xFFB9855B.toInt())
+                rect.set(item.x - 14f, top, item.x + 14f, FUXING_JUMP_GROUND_Y)
+                canvas.drawRoundRect(rect, 3f, 3f, paint)
+                paint.color = color(0xFFE7C19A.toInt())
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = 2f
+                canvas.drawLine(item.x - 12f, top + 5f, item.x + 12f, FUXING_JUMP_GROUND_Y - 5f, paint)
+                canvas.drawLine(item.x + 12f, top + 5f, item.x - 12f, FUXING_JUMP_GROUND_Y - 5f, paint)
+                paint.style = Paint.Style.FILL
+            }
+            JumpingKind.YARN -> {
+                drawCircle(canvas, item.x, FUXING_JUMP_GROUND_Y - 10f, 11f, PINK)
+                paint.color = color(0xFFFFDCE4.toInt())
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = 1.5f
+                canvas.drawArc(RectF(item.x - 7f, FUXING_JUMP_GROUND_Y - 17f, item.x + 7f, FUXING_JUMP_GROUND_Y - 3f), 10f, 145f, false, paint)
+                canvas.drawArc(RectF(item.x - 5f, FUXING_JUMP_GROUND_Y - 16f, item.x + 6f, FUXING_JUMP_GROUND_Y - 4f), 190f, 140f, false, paint)
+                paint.style = Paint.Style.FILL
+            }
+            JumpingKind.COIN -> {
+                drawCircle(canvas, item.x, FUXING_JUMP_GROUND_Y - 43f, 13f, 0x254B8068)
+                drawCircle(canvas, item.x, FUXING_JUMP_GROUND_Y - 43f, 9f, GOLD)
+                paint.color = color(0xFFB98B37.toInt())
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = 1.3f
+                canvas.drawCircle(item.x, FUXING_JUMP_GROUND_Y - 43f, 5.5f, paint)
+                paint.style = Paint.Style.FILL
+                drawCircle(canvas, item.x, FUXING_JUMP_GROUND_Y - 43f, 1.7f, TEXT)
+            }
+            JumpingKind.FISH -> {
+                val cy = FUXING_JUMP_GROUND_Y - 43f
+                val body = Path().apply {
+                    moveTo(item.x - 12f, cy)
+                    quadTo(item.x - 2f, cy - 10f, item.x + 8f, cy - 3f)
+                    quadTo(item.x + 13f, cy, item.x + 8f, cy + 3f)
+                    quadTo(item.x - 2f, cy + 10f, item.x - 12f, cy)
+                    close()
+                }
+                val tail = Path().apply {
+                    moveTo(item.x + 7f, cy); lineTo(item.x + 16f, cy - 7f); lineTo(item.x + 16f, cy + 7f); close()
+                }
+                paint.color = color(MINT_LIGHT)
+                canvas.drawPath(body, paint)
+                paint.color = color(MINT)
+                canvas.drawPath(tail, paint)
+                drawCircle(canvas, item.x - 6f, cy - 1.5f, 1.4f, FACE)
+            }
+        }
+    }
+
+    private fun drawFuxingJumpRunner(canvas: Canvas, jumpHeight: Float) {
+        val centerY = FUXING_JUMP_BASE_Y - jumpHeight
+        drawCircle(canvas, FUXING_JUMP_RUNNER_X, FUXING_JUMP_GROUND_Y + 2f, 19f, SHADOW)
+        canvas.save()
+        canvas.translate(FUXING_JUMP_RUNNER_X, centerY)
+        // Compress slightly for the runner view while retaining Fuxing's chest badge.
+        canvas.scale(FUXING_JUMP_SCALE, FUXING_JUMP_SCALE)
+        canvas.translate(-180f, -150f)
+        val neutral = PetVisuals()
+        drawFuxingBase(canvas)
+        drawFace(canvas, neutral)
+        drawFuxingFaceDetails(canvas)
+        drawFuxingIdBadge(canvas)
+        canvas.restore()
+
+        if (jumpHeight > 8f) {
+            paint.color = color(MINT_LIGHT)
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 1.4f
+            canvas.drawArc(
+                RectF(FUXING_JUMP_RUNNER_X - 26f, centerY - 30f, FUXING_JUMP_RUNNER_X + 26f, centerY + 24f),
+                205f, 75f, false, paint
+            )
+            paint.style = Paint.Style.FILL
+        }
+    }
+
+    private fun startFuxingJumpGame() {
+        mode = Mode.FUXING_JUMP
+        gameElapsedBeforePause = 0L
+        gameStartedAt = SystemClock.elapsedRealtime()
+        gameResultSent = false
+        fuxingJumpObjects.clear()
+        fuxingJumpRawScore = 0
+        fuxingJumpHint = "轻点跳跃，越过障碍并收集奖励！"
+        fuxingJumpStartedAt = -FUXING_JUMP_DURATION_MS
+        fuxingJumpNextSpawnAt = FUXING_JUMP_FIRST_SPAWN_MS
+        fuxingJumpLastElapsed = 0L
+        fuxingJumpNextId = 1L
+        spawnFuxingJumpObject(0L)
+        fuxingJumpNextSpawnAt = FUXING_JUMP_FIRST_SPAWN_MS
+        invalidate()
+    }
+
+    private fun spawnFuxingJumpObject(elapsed: Long) {
+        if (fuxingJumpObjects.size >= FUXING_JUMP_MAX_OBJECTS) return
+        val roll = Random.nextInt(100)
+        val kind = when {
+            roll < 25 -> JumpingKind.BOX
+            roll < 45 -> JumpingKind.YARN
+            roll < 74 -> JumpingKind.COIN
+            else -> JumpingKind.FISH
+        }
+        val speedMultiplier = if (elapsed >= 15_000L) 1.18f else 1f
+        val speed = Random.nextInt(FUXING_JUMP_MIN_SPEED, FUXING_JUMP_MAX_SPEED + 1) * speedMultiplier
+        fuxingJumpObjects += JumpingObject(
+            id = fuxingJumpNextId++,
+            x = FUXING_JUMP_SPAWN_X,
+            kind = kind,
+            speed = speed
+        )
+    }
+
+    private fun jumpHeightAt(elapsed: Long): Float {
+        val jumpElapsed = elapsed - fuxingJumpStartedAt
+        if (jumpElapsed < 0L || jumpElapsed > FUXING_JUMP_DURATION_MS) return 0f
+        val t = jumpElapsed.toFloat() / FUXING_JUMP_DURATION_MS.toFloat()
+        return (4f * FUXING_JUMP_MAX_HEIGHT * t * (1f - t)).coerceAtLeast(0f)
+    }
+
+    private fun tryStartFuxingJump(elapsed: Long) {
+        if (jumpHeightAt(elapsed) > 1f) return // no double-jump while airborne
+        fuxingJumpStartedAt = elapsed
+        fuxingJumpHint = "跳起来啦！"
+        invalidate()
+    }
+
+    private fun updateFuxingJump() {
+        val elapsed = gameElapsed()
+        val deltaMs = (elapsed - fuxingJumpLastElapsed).coerceIn(0L, FUXING_JUMP_MAX_FRAME_DELTA_MS)
+        fuxingJumpLastElapsed = elapsed
+        if (elapsed >= fuxingJumpNextSpawnAt && fuxingJumpObjects.size < FUXING_JUMP_MAX_OBJECTS) {
+            spawnFuxingJumpObject(elapsed)
+            val interval = if (elapsed >= 15_000L) {
+                Random.nextLong(FUXING_JUMP_SPAWN_LATE_MIN_MS, FUXING_JUMP_SPAWN_LATE_MAX_MS + 1L)
+            } else {
+                Random.nextLong(FUXING_JUMP_SPAWN_MIN_MS, FUXING_JUMP_SPAWN_MAX_MS + 1L)
+            }
+            fuxingJumpNextSpawnAt = elapsed + interval
+        }
+
+        val deltaSeconds = deltaMs.toFloat() / 1_000f
+        val jumpHeight = jumpHeightAt(elapsed)
+        val iterator = fuxingJumpObjects.iterator()
+        while (iterator.hasNext()) {
+            val item = iterator.next()
+            val previousX = item.x
+            item.x -= item.speed * deltaSeconds
+            val crossedRunner = previousX > FUXING_JUMP_RUNNER_X + FUXING_JUMP_COLLISION_X &&
+                item.x <= FUXING_JUMP_RUNNER_X + FUXING_JUMP_COLLISION_X
+            if (crossedRunner) {
+                when (item.kind) {
+                    JumpingKind.COIN -> {
+                        fuxingJumpRawScore = (fuxingJumpRawScore + 1).coerceAtMost(FUXING_JUMP_RAW_SCORE_CAP)
+                        fuxingJumpHint = "接住金币！+1"
+                    }
+                    JumpingKind.FISH -> {
+                        fuxingJumpRawScore = (fuxingJumpRawScore + 2).coerceAtMost(FUXING_JUMP_RAW_SCORE_CAP)
+                        fuxingJumpHint = "接住鱼干！+2"
+                    }
+                    JumpingKind.BOX, JumpingKind.YARN -> {
+                        val safeJumpHeight = if (item.kind == JumpingKind.BOX) 29f else 20f
+                        if (jumpHeight >= safeJumpHeight) {
+                            fuxingJumpHint = "漂亮！躲开障碍！"
+                        } else {
+                            fuxingJumpRawScore = (fuxingJumpRawScore - FUXING_JUMP_COLLISION_PENALTY).coerceAtLeast(0)
+                            fuxingJumpHint = "哎呀，撞到障碍了！-${FUXING_JUMP_COLLISION_PENALTY}"
+                        }
+                    }
+                }
+                iterator.remove()
+            } else if (item.x < FUXING_JUMP_REMOVE_X) {
+                iterator.remove()
+            }
+        }
+        invalidate()
+    }
+
     private fun startGameMenu() {
         cancelScrollFling()
         mode = Mode.GAME_MENU
@@ -1726,11 +1992,12 @@ class PetView(context: Context) : View(context) {
     }
 
     private fun isTimedGameMode(): Boolean =
-        mode == Mode.GAME || mode == Mode.CAT_PAW || mode == Mode.FUXING_CATCH
+        mode == Mode.GAME || mode == Mode.CAT_PAW || mode == Mode.FUXING_CATCH || mode == Mode.FUXING_JUMP
 
     private fun activeGameLengthMs(): Long = when (mode) {
         Mode.CAT_PAW -> CAT_PAW_GAME_LENGTH_MS
         Mode.FUXING_CATCH -> FUXING_CATCH_GAME_LENGTH_MS
+        Mode.FUXING_JUMP -> FUXING_JUMP_GAME_LENGTH_MS
         else -> GAME_LENGTH_MS
     }
 
@@ -1746,6 +2013,7 @@ class PetView(context: Context) : View(context) {
     private fun rewardScoreForCurrentGame(): Int = when (mode) {
         Mode.CAT_PAW -> (catPawRawScore / CAT_PAW_POINTS_PER_REWARD).coerceIn(0, PetState.MAX_GAME_SCORE)
         Mode.FUXING_CATCH -> (fuxingCatchRawScore / FUXING_POINTS_PER_REWARD).coerceIn(0, PetState.MAX_GAME_SCORE)
+        Mode.FUXING_JUMP -> (fuxingJumpRawScore / FUXING_JUMP_POINTS_PER_REWARD).coerceIn(0, PetState.MAX_GAME_SCORE)
         else -> gameScore.coerceIn(0, PetState.MAX_GAME_SCORE)
     }
 
@@ -1755,6 +2023,7 @@ class PetView(context: Context) : View(context) {
         val gameId = when (finishedMode) {
             Mode.CAT_PAW -> "cat_paw"
             Mode.FUXING_CATCH -> "fuxing_catch"
+            Mode.FUXING_JUMP -> "fuxing_jump"
             else -> "timing"
         }
         val rewardScore = rewardScoreForMode(finishedMode)
@@ -1775,6 +2044,7 @@ class PetView(context: Context) : View(context) {
         val gameId = when (finishedMode) {
             Mode.CAT_PAW -> "cat_paw"
             Mode.FUXING_CATCH -> "fuxing_catch"
+            Mode.FUXING_JUMP -> "fuxing_jump"
             else -> "timing"
         }
         val rewardScore = rewardScoreForMode(finishedMode)
@@ -1792,6 +2062,7 @@ class PetView(context: Context) : View(context) {
     private fun rewardScoreForMode(finishedMode: Mode): Int = when (finishedMode) {
         Mode.CAT_PAW -> (catPawRawScore / CAT_PAW_POINTS_PER_REWARD).coerceIn(0, PetState.MAX_GAME_SCORE)
         Mode.FUXING_CATCH -> (fuxingCatchRawScore / FUXING_POINTS_PER_REWARD).coerceIn(0, PetState.MAX_GAME_SCORE)
+        Mode.FUXING_JUMP -> (fuxingJumpRawScore / FUXING_JUMP_POINTS_PER_REWARD).coerceIn(0, PetState.MAX_GAME_SCORE)
         else -> gameScore.coerceIn(0, PetState.MAX_GAME_SCORE)
     }
 
@@ -1849,6 +2120,9 @@ class PetView(context: Context) : View(context) {
             if (mode == Mode.FUXING_CATCH && y < 307f) {
                 fuxingCatchX = x.coerceIn(FUXING_MIN_X, FUXING_MAX_X)
                 invalidate()
+            }
+            if (mode == Mode.FUXING_JUMP && y < FUXING_JUMP_END_BUTTON_TOP) {
+                tryStartFuxingJump(gameElapsed())
             }
             touchDownX = x
             touchDownY = y
@@ -1964,18 +2238,36 @@ class PetView(context: Context) : View(context) {
                 invalidate()
                 return true
             }
-            if (y in 64f..130f && x in 40f..320f) {
+            if (y in 56f..108f && x in 40f..320f) {
                 startGame()
                 return true
             }
-            if (y in 137f..203f && x in 40f..320f) {
+            if (y in 112f..164f && x in 40f..320f) {
                 startCatPawGame()
                 return true
             }
-            if (y in 210f..276f && x in 40f..320f) {
+            if (y in 168f..220f && x in 40f..320f) {
                 startFuxingCatchGame()
                 return true
             }
+            if (y in 224f..276f && x in 40f..320f) {
+                startFuxingJumpGame()
+                return true
+            }
+            return true
+        }
+
+        if (mode == Mode.FUXING_JUMP) {
+            if (y in FUXING_JUMP_END_BUTTON_TOP..345f && x in 130f..230f) {
+                finishGameEarly()
+                return true
+            }
+            if (gameElapsed() >= FUXING_JUMP_GAME_LENGTH_MS) {
+                finishGameNormally()
+                return true
+            }
+            // Jump starts on ACTION_DOWN for responsive controls; ACTION_UP only consumes the tap.
+            invalidate()
             return true
         }
 
@@ -2125,7 +2417,7 @@ class PetView(context: Context) : View(context) {
         )
     }
 
-    private enum class Mode { HOME, GAME_MENU, GAME, CAT_PAW, FUXING_CATCH, TASKS, SHOP }
+    private enum class Mode { HOME, GAME_MENU, GAME, CAT_PAW, FUXING_CATCH, FUXING_JUMP, TASKS, SHOP }
     private enum class Action { FEED, PET, GAME }
 
     private companion object {
@@ -2137,6 +2429,29 @@ class PetView(context: Context) : View(context) {
         const val CAT_PAW_RAW_SCORE_CAP = 14
         const val CAT_PAW_POINTS_PER_REWARD = 2
         const val FUXING_CATCH_GAME_LENGTH_MS = 30_000L
+        const val FUXING_JUMP_GAME_LENGTH_MS = 30_000L
+        const val FUXING_JUMP_GROUND_Y = 247f
+        const val FUXING_JUMP_BASE_Y = 221f
+        const val FUXING_JUMP_RUNNER_X = 101f
+        const val FUXING_JUMP_SCALE = 0.52f
+        const val FUXING_JUMP_MAX_HEIGHT = 62f
+        const val FUXING_JUMP_DURATION_MS = 720L
+        const val FUXING_JUMP_SPAWN_X = 344f
+        const val FUXING_JUMP_REMOVE_X = 38f
+        const val FUXING_JUMP_MAX_OBJECTS = 4
+        const val FUXING_JUMP_MIN_SPEED = 112
+        const val FUXING_JUMP_MAX_SPEED = 151
+        const val FUXING_JUMP_FIRST_SPAWN_MS = 750L
+        const val FUXING_JUMP_SPAWN_MIN_MS = 900L
+        const val FUXING_JUMP_SPAWN_MAX_MS = 1_280L
+        const val FUXING_JUMP_SPAWN_LATE_MIN_MS = 720L
+        const val FUXING_JUMP_SPAWN_LATE_MAX_MS = 1_020L
+        const val FUXING_JUMP_MAX_FRAME_DELTA_MS = 90L
+        const val FUXING_JUMP_COLLISION_X = 21f
+        const val FUXING_JUMP_COLLISION_PENALTY = 1
+        const val FUXING_JUMP_RAW_SCORE_CAP = 42
+        const val FUXING_JUMP_POINTS_PER_REWARD = 3
+        const val FUXING_JUMP_END_BUTTON_TOP = 310f
         const val FUXING_CATCHER_Y = 246f
         const val FUXING_CATCHER_SCALE = 0.43f
         const val FUXING_CATCH_HALF_WIDTH = 26f
