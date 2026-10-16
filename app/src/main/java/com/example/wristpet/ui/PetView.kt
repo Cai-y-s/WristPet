@@ -6,6 +6,8 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.Typeface
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -140,6 +142,7 @@ class PetView(context: Context) : View(context) {
     private var lastFrameAt = 0L
 
     private val handler = Handler(Looper.getMainLooper())
+    private var toneGenerator: ToneGenerator? = null
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val rect = RectF()
     private val ticker = object : Runnable {
@@ -228,6 +231,41 @@ class PetView(context: Context) : View(context) {
             if (mode == Mode.FUXING_CATCH) fuxingLastUpdateAt = 0L
             if (mode == Mode.FUXING_JUMP) fuxingJumpLastElapsed = gameElapsedBeforePause
             lastFrameAt = 0L
+            releaseAudio()
+        }
+    }
+
+    override fun onDetachedFromWindow() {
+        releaseAudio()
+        super.onDetachedFromWindow()
+    }
+
+    private enum class SoundCue { TAP, GOOD, BAD }
+
+    /** Short built-in tones; no audio assets or network access are required. */
+    private fun playFeedback(cue: SoundCue) {
+        try {
+            val generator = toneGenerator ?: ToneGenerator(AudioManager.STREAM_MUSIC, 68)
+                .also { toneGenerator = it }
+            val tone = when (cue) {
+                SoundCue.TAP -> ToneGenerator.TONE_PROP_BEEP
+                SoundCue.GOOD -> ToneGenerator.TONE_PROP_ACK
+                SoundCue.BAD -> ToneGenerator.TONE_PROP_NACK
+            }
+            generator.startTone(tone, if (cue == SoundCue.GOOD) 110 else 75)
+        } catch (_: RuntimeException) {
+            // Some watch audio stacks reject ToneGenerator; the UI must still work.
+        }
+    }
+
+    private fun releaseAudio() {
+        try {
+            toneGenerator?.stopTone()
+            toneGenerator?.release()
+        } catch (_: RuntimeException) {
+            // Ignore vendor audio-stack errors during pause/detach.
+        } finally {
+            toneGenerator = null
         }
     }
 
@@ -261,13 +299,14 @@ class PetView(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        canvas.drawColor(color(BG))
+        canvas.drawColor(color(backgroundForMode()))
         val logicalScale = min(width.toFloat(), height.toFloat()) / DESIGN_SIZE
         val offsetX = (width - DESIGN_SIZE * logicalScale) / 2f
         val offsetY = (height - DESIGN_SIZE * logicalScale) / 2f
         val saveCount = canvas.save()
         canvas.translate(offsetX, offsetY)
         canvas.scale(logicalScale, logicalScale)
+        drawModeBackdrop(canvas)
         when (mode) {
             Mode.HOME -> drawHome(canvas)
             Mode.GAME_MENU -> drawGameMenu(canvas)
@@ -279,6 +318,39 @@ class PetView(context: Context) : View(context) {
             Mode.SHOP -> drawShop(canvas)
         }
         canvas.restoreToCount(saveCount)
+    }
+
+    private fun backgroundForMode(): Int = when (mode) {
+        Mode.HOME -> 0xFF28545E.toInt()        // deep aqua
+        Mode.GAME_MENU -> 0xFF354C73.toInt()   // blue-violet
+        Mode.GAME -> 0xFF344F78.toInt()        // timing challenge
+        Mode.CAT_PAW -> 0xFF66446E.toInt()     // berry purple
+        Mode.FUXING_CATCH -> 0xFF24616B.toInt()// ocean teal
+        Mode.FUXING_JUMP -> 0xFF32684F.toInt() // garden green
+        Mode.TASKS -> 0xFF55466B.toInt()       // plum
+        Mode.SHOP -> 0xFF705039.toInt()        // warm caramel
+    }
+
+    /** Large translucent colour washes make every page visibly different without obscuring text. */
+    private fun drawModeBackdrop(canvas: Canvas) {
+        val (glowA, glowB) = when (mode) {
+            Mode.HOME -> 0x287DE3B5 to 0x24FFD166
+            Mode.GAME_MENU -> 0x284F91D9 to 0x287DE3B5
+            Mode.GAME -> 0x285A7DCC to 0x24FFD166
+            Mode.CAT_PAW -> 0x28FFA5B8 to 0x284F91D9
+            Mode.FUXING_CATCH -> 0x287DE3B5 to 0x28FFD166
+            Mode.FUXING_JUMP -> 0x287DE3B5 to 0x28E7C56B
+            Mode.TASKS -> 0x28FFA5B8 to 0x285A7DCC
+            Mode.SHOP -> 0x28FFD166 to 0x28FFA5B8
+        }
+        drawCircle(canvas, 46f, 92f, 66f, glowA)
+        drawCircle(canvas, 315f, 246f, 78f, glowB)
+        drawCircle(canvas, 180f, 355f, 66f, 0x16FFFFFF)
+        // A few tiny stars are kept away from primary text and touch controls.
+        drawCircle(canvas, 106f, 77f, 1.7f, 0x88FFFFFF.toInt())
+        drawCircle(canvas, 285f, 88f, 1.4f, 0x88FFFFFF.toInt())
+        drawCircle(canvas, 58f, 214f, 1.3f, 0x66FFFFFF)
+        drawCircle(canvas, 302f, 177f, 1.6f, 0x66FFFFFF)
     }
 
     private fun drawHome(canvas: Canvas) {
@@ -311,10 +383,12 @@ class PetView(context: Context) : View(context) {
         text(canvas, "亲密", 59f, 250f, 10f, MUTED, align = Paint.Align.LEFT)
         drawBar(canvas, 105f, 245f, 301f, state.affection / 100f, PINK)
 
-        drawActionButton(canvas, 78f, 290f, "喂食", Action.FEED)
-        drawActionButton(canvas, 180f, 290f, "摸摸", Action.PET)
-        drawActionButton(canvas, 282f, 290f, "玩耍", Action.GAME)
-        text(canvas, "经验 ${state.exp}  今日成长 ${state.dailyExpEarned}/${PetState.MAX_DAILY_EXP}  金币 ${state.coins}", 180f, 337f, 8.5f, MUTED)
+        // Lift controls into the wider part of the round screen; labels no longer
+        // sit on the tapered lower edge where the watch bezel clips them.
+        drawActionButton(canvas, 86f, 266f, "喂食", Action.FEED)
+        drawActionButton(canvas, 180f, 266f, "摸摸", Action.PET)
+        drawActionButton(canvas, 274f, 266f, "玩耍", Action.GAME)
+        text(canvas, "经验 ${state.exp} · 今日 ${state.dailyExpEarned}/${PetState.MAX_DAILY_EXP} · 金币 ${state.coins}", 180f, 329f, 7.1f, MUTED)
     }
 
     // ---------------------------------------------------------------- daily tasks
@@ -415,7 +489,7 @@ class PetView(context: Context) : View(context) {
 
         drawCircle(canvas, 58f, centerY - 1f, 9f, if (completed) MINT else TRACK)
         if (completed) {
-            text(canvas, "✓", 58f, centerY + 3.5f, 11f, BG, bold = true)
+            text(canvas, "✓", 58f, centerY + 3.5f, 11f, 0x14343A, bold = true)
         } else {
             drawCircle(canvas, 58f, centerY - 1f, 3f, GOLD)
         }
@@ -1621,14 +1695,17 @@ class PetView(context: Context) : View(context) {
             if (inCatchBand && abs(item.x - fuxingCatchX) <= FUXING_CATCH_HALF_WIDTH) {
                 when (item.kind) {
                     FallingKind.COIN -> {
+                        playFeedback(SoundCue.GOOD)
                         fuxingCatchRawScore = (fuxingCatchRawScore + 1).coerceAtMost(FUXING_RAW_SCORE_CAP)
                         fuxingCatchHint = "接住金币！+1"
                     }
                     FallingKind.FISH -> {
+                        playFeedback(SoundCue.GOOD)
                         fuxingCatchRawScore = (fuxingCatchRawScore + 2).coerceAtMost(FUXING_RAW_SCORE_CAP)
                         fuxingCatchHint = "接住鱼干！+2"
                     }
                     FallingKind.ROCK -> {
+                        playFeedback(SoundCue.BAD)
                         fuxingCatchRawScore = (fuxingCatchRawScore - 2).coerceAtLeast(0)
                         fuxingCatchHint = "哎呀，接到石头了！-2"
                     }
@@ -1816,6 +1893,7 @@ class PetView(context: Context) : View(context) {
 
     private fun tryStartFuxingJump(elapsed: Long) {
         if (jumpHeightAt(elapsed) > 1f) return // no double-jump while airborne
+        playFeedback(SoundCue.TAP)
         fuxingJumpStartedAt = elapsed
         fuxingJumpHint = "跳起来啦！"
         invalidate()
@@ -1847,18 +1925,22 @@ class PetView(context: Context) : View(context) {
             if (crossedRunner) {
                 when (item.kind) {
                     JumpingKind.COIN -> {
+                        playFeedback(SoundCue.GOOD)
                         fuxingJumpRawScore = (fuxingJumpRawScore + 1).coerceAtMost(FUXING_JUMP_RAW_SCORE_CAP)
                         fuxingJumpHint = "接住金币！+1"
                     }
                     JumpingKind.FISH -> {
+                        playFeedback(SoundCue.GOOD)
                         fuxingJumpRawScore = (fuxingJumpRawScore + 2).coerceAtMost(FUXING_JUMP_RAW_SCORE_CAP)
                         fuxingJumpHint = "接住鱼干！+2"
                     }
                     JumpingKind.BOX, JumpingKind.YARN -> {
                         val safeJumpHeight = if (item.kind == JumpingKind.BOX) 29f else 20f
                         if (jumpHeight >= safeJumpHeight) {
+                            playFeedback(SoundCue.GOOD)
                             fuxingJumpHint = "漂亮！躲开障碍！"
                         } else {
+                            playFeedback(SoundCue.BAD)
                             fuxingJumpRawScore = (fuxingJumpRawScore - FUXING_JUMP_COLLISION_PENALTY).coerceAtLeast(0)
                             fuxingJumpHint = "哎呀，撞到障碍了！-${FUXING_JUMP_COLLISION_PENALTY}"
                         }
@@ -1917,6 +1999,7 @@ class PetView(context: Context) : View(context) {
         val dx = x - catPawTargetX
         val dy = y - catPawTargetY
         if (dx * dx + dy * dy > CAT_PAW_HIT_RADIUS * CAT_PAW_HIT_RADIUS) {
+            playFeedback(SoundCue.BAD)
             catPawHint = "没拍中，再试试！"
             invalidate()
             return
@@ -1924,14 +2007,17 @@ class PetView(context: Context) : View(context) {
 
         when (catPawTarget) {
             CatPawTarget.COIN -> {
+                playFeedback(SoundCue.GOOD)
                 catPawRawScore = (catPawRawScore + 1).coerceAtMost(CAT_PAW_RAW_SCORE_CAP)
                 catPawHint = "命中金币！+1"
             }
             CatPawTarget.FISH -> {
+                playFeedback(SoundCue.GOOD)
                 catPawRawScore = (catPawRawScore + 2).coerceAtMost(CAT_PAW_RAW_SCORE_CAP)
                 catPawHint = "接住鱼干！+2"
             }
             CatPawTarget.BOMB -> {
+                playFeedback(SoundCue.BAD)
                 catPawRawScore = (catPawRawScore - 2).coerceAtLeast(0)
                 catPawHint = "哎呀，拍到炸弹了！-2"
             }
@@ -2019,6 +2105,7 @@ class PetView(context: Context) : View(context) {
 
     private fun finishGameNormally() {
         if (!isTimedGameMode() || gameResultSent) return
+        playFeedback(SoundCue.GOOD)
         val finishedMode = mode
         val gameId = when (finishedMode) {
             Mode.CAT_PAW -> "cat_paw"
@@ -2040,6 +2127,7 @@ class PetView(context: Context) : View(context) {
 
     private fun finishGameEarly() {
         if (!isTimedGameMode() || gameResultSent) return
+        playFeedback(SoundCue.TAP)
         val finishedMode = mode
         val gameId = when (finishedMode) {
             Mode.CAT_PAW -> "cat_paw"
@@ -2198,6 +2286,7 @@ class PetView(context: Context) : View(context) {
 
         if (mode == Mode.TASKS) {
             if (x in 120f..240f && y in 300f..340f) {
+                playFeedback(SoundCue.TAP)
                 mode = Mode.HOME
                 invalidate()
             }
@@ -2207,13 +2296,14 @@ class PetView(context: Context) : View(context) {
         if (mode == Mode.SHOP) {
             if (y in 55f..89f) {
                 when {
-                    x in 40f..176f -> { shopCategory = ShopItemType.ACCESSORY; shopScrollY = 0f }
-                    x in 184f..320f -> { shopCategory = ShopItemType.PET; shopScrollY = 0f }
+                    x in 40f..176f -> { playFeedback(SoundCue.TAP); shopCategory = ShopItemType.ACCESSORY; shopScrollY = 0f }
+                    x in 184f..320f -> { playFeedback(SoundCue.TAP); shopCategory = ShopItemType.PET; shopScrollY = 0f }
                 }
                 invalidate()
                 return true
             }
             if (x in 120f..240f && y in 300f..340f) {
+                playFeedback(SoundCue.TAP)
                 mode = Mode.HOME
                 invalidate()
                 return true
@@ -2224,6 +2314,7 @@ class PetView(context: Context) : View(context) {
                 if (index in items.indices) {
                     val rowCenter = DETAIL_FIRST_ROW_CENTER + index * DETAIL_ROW_HEIGHT - shopScrollY
                     if (kotlin.math.abs(y - rowCenter) <= DETAIL_ROW_HALF_HEIGHT + 4f) {
+                        playFeedback(SoundCue.TAP)
                         listener?.onShopItemSelected(items[index].id)
                     }
                 }
@@ -2234,23 +2325,28 @@ class PetView(context: Context) : View(context) {
 
         if (mode == Mode.GAME_MENU) {
             if (x in 120f..240f && y in 300f..340f) {
+                playFeedback(SoundCue.TAP)
                 mode = Mode.HOME
                 invalidate()
                 return true
             }
             if (y in 56f..108f && x in 40f..320f) {
+                playFeedback(SoundCue.TAP)
                 startGame()
                 return true
             }
             if (y in 112f..164f && x in 40f..320f) {
+                playFeedback(SoundCue.TAP)
                 startCatPawGame()
                 return true
             }
             if (y in 168f..220f && x in 40f..320f) {
+                playFeedback(SoundCue.TAP)
                 startFuxingCatchGame()
                 return true
             }
             if (y in 224f..276f && x in 40f..320f) {
+                playFeedback(SoundCue.TAP)
                 startFuxingJumpGame()
                 return true
             }
@@ -2312,12 +2408,14 @@ class PetView(context: Context) : View(context) {
             val dotAngle = -PI / 2.0 + (elapsed % ROTATION_MS).toDouble() / ROTATION_MS * 2.0 * PI
             val diff = angleDistance(dotAngle, -PI / 2.0)
             if (diff <= HIT_WINDOW_RADIANS && round != lastHitRound) {
+                playFeedback(SoundCue.GOOD)
                 gameScore = (gameScore + 1).coerceAtMost(PetState.MAX_GAME_SCORE)
                 lastHitRound = round
                 gameHint = "命中！很好！"
             } else if (round == lastHitRound) {
                 gameHint = "本圈已经命中过啦"
             } else {
+                playFeedback(SoundCue.BAD)
                 gameHint = "差一点，再试试"
             }
             invalidate()
@@ -2326,6 +2424,7 @@ class PetView(context: Context) : View(context) {
 
         // Top-left coin shop button (home only).
         if (x in 60f..121f && y in 35f..69f) {
+            playFeedback(SoundCue.TAP)
             shopScrollY = 0f
             shopCategory = ShopItemType.ACCESSORY
             shopNotice = "购买装饰，或解锁新的伙伴。"
@@ -2336,6 +2435,7 @@ class PetView(context: Context) : View(context) {
 
         // Top-right task button (home only).
         if (x in 238f..292f && y in 35f..69f) {
+            playFeedback(SoundCue.TAP)
             taskScrollY = 0f
             mode = Mode.TASKS
             invalidate()
@@ -2345,6 +2445,7 @@ class PetView(context: Context) : View(context) {
         // A persisted discovery appears as a small gold coin on the home screen.
         if (x in 226f..263f && y in 116f..155f &&
             DailyRewards.hasDiscovery(state, todayKeyForView())) {
+            playFeedback(SoundCue.GOOD)
             listener?.onClaimDiscovery()
             invalidate()
             return true
@@ -2353,18 +2454,20 @@ class PetView(context: Context) : View(context) {
         // Tapping the pet itself: pet while awake, or gently wake it while asleep.
         if (y in 100f..200f && x in 140f..220f) {
             if (behavior?.state == PetBehavior.State.SLEEPING) {
+                playFeedback(SoundCue.TAP)
                 listener?.onWake()
             } else {
+                playFeedback(SoundCue.GOOD)
                 listener?.onPet()
             }
             return true
         }
 
-        if (y in 263f..333f) {
+        if (y in 241f..321f) {
             when {
-                x in 40f..116f -> listener?.onFeed()
-                x in 142f..218f -> listener?.onPet()
-                x in 244f..320f -> startGameMenu()
+                x in 44f..126f -> { playFeedback(SoundCue.TAP); listener?.onFeed() }
+                x in 140f..220f -> { playFeedback(SoundCue.GOOD); listener?.onPet() }
+                x in 234f..316f -> { playFeedback(SoundCue.TAP); startGameMenu() }
             }
         }
         return true
