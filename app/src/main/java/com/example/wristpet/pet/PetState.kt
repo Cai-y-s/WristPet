@@ -25,7 +25,15 @@ data class PetState(
     val discoveryClaimedDay: String = "",
     // Coins earned from minigame scores are capped independently from task bonuses.
     val gameCoinDay: String = "",
-    val dailyGameCoinsEarned: Int = 0
+    val dailyGameCoinsEarned: Int = 0,
+    /** Comma-separated IDs owned by this save; starter sprout is always owned. */
+    val ownedPetIds: String = "sprout",
+    /** Currently selected companion. */
+    val activePetId: String = "sprout",
+    /** Comma-separated purchased cosmetic IDs. */
+    val ownedAccessoryIds: String = "",
+    /** Equipped accessory ID, or empty when none is equipped. */
+    val equippedAccessoryId: String = ""
 ) {
     val level: Int
         get() = (exp / 20 + 1).coerceIn(1, 99)

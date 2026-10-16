@@ -9,6 +9,7 @@ import com.example.wristpet.pet.DailyTask
 import com.example.wristpet.pet.PetBehavior
 import com.example.wristpet.pet.PetRepository
 import com.example.wristpet.pet.PetState
+import com.example.wristpet.pet.ShopCatalog
 import com.example.wristpet.ui.PetView
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -144,6 +145,14 @@ class MainActivity : Activity(), PetView.Listener {
 
         if (safeScore > 0 || taskGrant.coinsAwarded > 0) behavior.onInteraction()
         publish(updated, parts.joinToString("，"))
+    }
+
+    override fun onShopItemSelected(itemId: String) {
+        val result = ShopCatalog.activate(currentState(), itemId)
+        petState = repository.save(result.state)
+        petView.setPetState(petState)
+        petView.setShopNotice(result.message)
+        if (result.changed) petView.setNotice(result.message)
     }
 
     override fun onClaimDiscovery() {

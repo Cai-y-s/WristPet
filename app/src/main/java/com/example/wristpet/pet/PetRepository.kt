@@ -36,7 +36,13 @@ class PetRepository(context: Context) {
             discoveryClaimedDay = prefs.getString(KEY_DISCOVERY_CLAIMED_DAY, "") ?: "",
             gameCoinDay = prefs.getString(KEY_GAME_COIN_DAY, "") ?: "",
             dailyGameCoinsEarned = prefs.getInt(KEY_DAILY_GAME_COINS, 0)
-                .coerceIn(0, PetState.MAX_DAILY_GAME_COINS)
+                .coerceIn(0, PetState.MAX_DAILY_GAME_COINS),
+            ownedPetIds = (prefs.getString(KEY_OWNED_PET_IDS, ShopCatalog.STARTER_PET_ID)
+                ?: ShopCatalog.STARTER_PET_ID).ifBlank { ShopCatalog.STARTER_PET_ID },
+            activePetId = (prefs.getString(KEY_ACTIVE_PET_ID, ShopCatalog.STARTER_PET_ID)
+                ?: ShopCatalog.STARTER_PET_ID).ifBlank { ShopCatalog.STARTER_PET_ID },
+            ownedAccessoryIds = prefs.getString(KEY_OWNED_ACCESSORY_IDS, "") ?: "",
+            equippedAccessoryId = prefs.getString(KEY_EQUIPPED_ACCESSORY_ID, "") ?: ""
         )
         return save(applyElapsedTime(stored, now).forDay(today))
     }
@@ -90,6 +96,10 @@ class PetRepository(context: Context) {
             .putString(KEY_DISCOVERY_CLAIMED_DAY, normalized.discoveryClaimedDay)
             .putString(KEY_GAME_COIN_DAY, normalized.gameCoinDay)
             .putInt(KEY_DAILY_GAME_COINS, normalized.dailyGameCoinsEarned)
+            .putString(KEY_OWNED_PET_IDS, normalized.ownedPetIds.ifBlank { ShopCatalog.STARTER_PET_ID })
+            .putString(KEY_ACTIVE_PET_ID, normalized.activePetId.ifBlank { ShopCatalog.STARTER_PET_ID })
+            .putString(KEY_OWNED_ACCESSORY_IDS, normalized.ownedAccessoryIds)
+            .putString(KEY_EQUIPPED_ACCESSORY_ID, normalized.equippedAccessoryId)
             .apply()
         return normalized
     }
@@ -118,5 +128,9 @@ class PetRepository(context: Context) {
         const val KEY_DISCOVERY_CLAIMED_DAY = "discovery_claimed_day"
         const val KEY_GAME_COIN_DAY = "game_coin_day"
         const val KEY_DAILY_GAME_COINS = "daily_game_coins"
+        const val KEY_OWNED_PET_IDS = "owned_pet_ids"
+        const val KEY_ACTIVE_PET_ID = "active_pet_id"
+        const val KEY_OWNED_ACCESSORY_IDS = "owned_accessory_ids"
+        const val KEY_EQUIPPED_ACCESSORY_ID = "equipped_accessory_id"
     }
 }

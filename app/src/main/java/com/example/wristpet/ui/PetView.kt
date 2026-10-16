@@ -21,6 +21,9 @@ import com.example.wristpet.pet.DailyRewards
 import com.example.wristpet.pet.DailyTask
 import com.example.wristpet.pet.PetBehavior
 import com.example.wristpet.pet.PetState
+import com.example.wristpet.pet.ShopCatalog
+import com.example.wristpet.pet.ShopItem
+import com.example.wristpet.pet.ShopItemType
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -47,6 +50,7 @@ class PetView(context: Context) : View(context) {
         /** Backward-compatible callback retained for older callers. */
         fun onGameFinished(score: Int)
         fun onClaimDiscovery()
+        fun onShopItemSelected(itemId: String)
 
         /** Common reward entry point for current and future minigames. */
         fun onMiniGameFinished(gameId: String, score: Int, completedNormally: Boolean) {
@@ -69,6 +73,10 @@ class PetView(context: Context) : View(context) {
     private var touchDownX = 0f
     private var touchDownY = 0f
     private var taskScrollY = 0f
+
+    private var shopCategory = ShopItemType.ACCESSORY
+    private var shopScrollY = 0f
+    private var shopNotice = "购买商品后会自动装备或切换伙伴。"
 
     private var gameStartedAt = 0L
     private var gameElapsedBeforePause = 0L
@@ -109,6 +117,11 @@ class PetView(context: Context) : View(context) {
         invalidate()
     }
 
+    fun setShopNotice(value: String) {
+        shopNotice = value
+        invalidate()
+    }
+
     fun setInteractive(active: Boolean) {
         if (isInteractive == active) return
         val now = SystemClock.elapsedRealtime()
@@ -142,6 +155,7 @@ class PetView(context: Context) : View(context) {
     private fun frameIntervalMs(): Long = when (mode) {
         Mode.GAME -> 45L
         Mode.TASKS -> 500L
+        Mode.SHOP -> 500L
         Mode.HOME -> when (behavior?.state) {
             PetBehavior.State.EVOLVING -> 40L
             PetBehavior.State.HAPPY -> 50L
@@ -166,6 +180,7 @@ class PetView(context: Context) : View(context) {
             Mode.HOME -> drawHome(canvas)
             Mode.GAME -> drawGame(canvas)
             Mode.TASKS -> drawDailyTasks(canvas)
+            Mode.SHOP -> drawShop(canvas)
         }
         canvas.restoreToCount(saveCount)
     }
@@ -178,7 +193,8 @@ class PetView(context: Context) : View(context) {
         drawCircle(canvas, 91f, 174f, 1.5f, GOLD)
 
         text(canvas, "腕上伙伴", 180f, 37f, 17f, TEXT, bold = true)
-        text(canvas, "Lv.${state.level}  ·  ${state.stage}", 180f, 57f, 10f, MUTED)
+        text(canvas, "${ShopCatalog.petName(state.activePetId)} · Lv.${state.level} · ${state.stage}", 180f, 57f, 9.2f, MUTED)
+        drawShopButton(canvas)
         drawDailyTaskButton(canvas)
 
         drawPet(canvas)
@@ -341,6 +357,176 @@ class PetView(context: Context) : View(context) {
 
     private fun todayKeyForView(): String =
         SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(System.currentTimeMillis()))
+
+    // ---------------------------------------------------------------- coin shop
+
+    private fun drawShopButton(canvas: Canvas) {
+        paint.color = color(PANEL)
+        rect.set(65f, 38f, 116f, 66f)
+        canvas.drawRoundRect(rect, 12f, 12f, paint)
+        drawCircle(canvas, 78f, 52f, 5.5f, GOLD)
+        text(canvas, "商店", 96f, 56f, 10f, TEXT, bold = true)
+    }
+
+    private fun drawShop(canvas: Canvas) {
+        text(canvas, "金币商店", 180f, 29f, 16f, TEXT, bold = true)
+        text(canvas, "余额 ${state.coins} 金币", 180f, 47f, 10f, GOLD, bold = true)
+        drawShopTab(canvas, 48f, 58f, 169f, 85f, "装饰", shopCategory == ShopItemType.ACCESSORY)
+        drawShopTab(canvas, 191f, 58f, 312f, 85f, "新伙伴", shopCategory == ShopItemType.PET)
+
+        val items = ShopCatalog.items(shopCategory)
+        val maxScroll = maxShopScroll(items.size)
+        shopScrollY = shopScrollY.coerceIn(0f, maxScroll)
+        val saveCount = canvas.save()
+        canvas.clipRect(38f, SHOP_VIEWPORT_TOP, 322f, SHOP_VIEWPORT_BOTTOM)
+        items.forEachIndexed { index, item ->
+            val centerY = SHOP_FIRST_ROW_CENTER + index * SHOP_ROW_HEIGHT - shopScrollY
+            drawShopItemRow(canvas, centerY, item)
+        }
+        canvas.restoreToCount(saveCount)
+        drawShopScrollIndicator(canvas, items.size)
+
+        text(canvas, shopNotice, 180f, 300f, 8.2f, MINT)
+        paint.color = color(PANEL)
+        rect.set(126f, 307f, 234f, 337f)
+        canvas.drawRoundRect(rect, 15f, 15f, paint)
+        text(canvas, "返回主页", 180f, 326f, 10.5f, TEXT, bold = true)
+    }
+
+    private fun drawShopTab(
+        canvas: Canvas,
+        left: Float,
+        top: Float,
+        right: Float,
+        bottom: Float,
+        label: String,
+        selected: Boolean
+    ) {
+        paint.color = color(if (selected) 0x254B8068 else PANEL)
+        rect.set(left, top, right, bottom)
+        canvas.drawRoundRect(rect, 13f, 13f, paint)
+        if (selected) {
+            paint.color = color(MINT)
+            rect.set(left + 8f, bottom - 3f, right - 8f, bottom)
+            canvas.drawRoundRect(rect, 1.5f, 1.5f, paint)
+        }
+        text(canvas, label, (left + right) / 2f, top + 18f, 10.5f, if (selected) MINT else TEXT, bold = selected)
+    }
+
+    private fun maxShopScroll(itemCount: Int): Float = (
+        SHOP_FIRST_ROW_CENTER + (itemCount - 1).coerceAtLeast(0) * SHOP_ROW_HEIGHT +
+            SHOP_ROW_HALF_HEIGHT - SHOP_VIEWPORT_BOTTOM
+        ).coerceAtLeast(0f)
+
+    private fun drawShopItemRow(canvas: Canvas, centerY: Float, item: ShopItem) {
+        val owned = ShopCatalog.isOwned(state, item)
+        val equipped = ShopCatalog.isEquipped(state, item)
+        paint.color = color(if (equipped) 0x2030443C else PANEL)
+        rect.set(42f, centerY - SHOP_ROW_HALF_HEIGHT, 318f, centerY + SHOP_ROW_HALF_HEIGHT)
+        canvas.drawRoundRect(rect, 12f, 12f, paint)
+        drawShopItemIcon(canvas, item, 61f, centerY)
+
+        text(canvas, item.name, 82f, centerY - 3f, 10.5f, TEXT, bold = true, align = Paint.Align.LEFT)
+        text(canvas, item.description, 82f, centerY + 12f, 8f, MUTED, align = Paint.Align.LEFT)
+
+        val actionLabel = when {
+            item.type == ShopItemType.PET && equipped -> "当前"
+            item.type == ShopItemType.PET && owned -> "切换"
+            item.type == ShopItemType.ACCESSORY && equipped -> "摘下"
+            item.type == ShopItemType.ACCESSORY && owned -> "装备"
+            item.price == 0 -> "免费"
+            else -> "${item.price}币"
+        }
+        paint.color = color(when {
+            equipped -> 0x254B8068
+            owned -> TRACK
+            state.coins >= item.price -> 0x253D6655
+            else -> 0x254D3B32
+        })
+        rect.set(253f, centerY - 13f, 311f, centerY + 13f)
+        canvas.drawRoundRect(rect, 9f, 9f, paint)
+        text(
+            canvas, actionLabel, 282f, centerY + 3.5f, 8.5f,
+            when {
+                equipped -> MINT
+                owned -> TEXT
+                state.coins >= item.price -> GOLD
+                else -> PINK
+            }, bold = true
+        )
+    }
+
+    private fun drawShopItemIcon(canvas: Canvas, item: ShopItem, cx: Float, cy: Float) {
+        when (item.id) {
+            "flower_crown" -> {
+                drawCircle(canvas, cx - 5f, cy - 2f, 4f, PINK)
+                drawCircle(canvas, cx + 1f, cy - 5f, 4f, MINT_LIGHT)
+                drawCircle(canvas, cx + 6f, cy, 4f, PINK)
+                drawCircle(canvas, cx + 1f, cy - 1f, 2f, GOLD)
+            }
+            "scarf" -> {
+                paint.color = color(PINK)
+                rect.set(cx - 8f, cy - 7f, cx + 8f, cy + 2f)
+                canvas.drawRoundRect(rect, 4f, 4f, paint)
+                val tail = Path().apply {
+                    moveTo(cx + 2f, cy); lineTo(cx + 8f, cy + 10f); lineTo(cx - 1f, cy + 7f); close()
+                }
+                canvas.drawPath(tail, paint)
+            }
+            "star_pin" -> drawSparkle(canvas, cx, cy, 8f, GOLD, 255)
+            "bunny" -> {
+                paint.color = color(0xF1DDE8)
+                rect.set(cx - 8f, cy - 12f, cx - 2f, cy + 2f)
+                canvas.drawRoundRect(rect, 3f, 3f, paint)
+                rect.set(cx + 2f, cy - 12f, cx + 8f, cy + 2f)
+                canvas.drawRoundRect(rect, 3f, 3f, paint)
+                drawCircle(canvas, cx, cy + 3f, 9f, 0xF1DDE8)
+            }
+            "fox" -> {
+                val p = Path().apply {
+                    moveTo(cx - 10f, cy - 4f); lineTo(cx - 6f, cy - 12f); lineTo(cx - 1f, cy - 4f); close()
+                }
+                paint.color = color(0xF5A35B); canvas.drawPath(p, paint)
+                val q = Path().apply {
+                    moveTo(cx + 1f, cy - 4f); lineTo(cx + 6f, cy - 12f); lineTo(cx + 10f, cy - 4f); close()
+                }
+                canvas.drawPath(q, paint)
+                drawCircle(canvas, cx, cy + 4f, 9f, 0xF5A35B)
+            }
+            "cat" -> {
+                val p = Path().apply {
+                    moveTo(cx - 10f, cy - 1f); lineTo(cx - 8f, cy - 12f); lineTo(cx, cy - 4f); close()
+                }
+                paint.color = color(0xC8C6FF); canvas.drawPath(p, paint)
+                val q = Path().apply {
+                    moveTo(cx, cy - 4f); lineTo(cx + 8f, cy - 12f); lineTo(cx + 10f, cy - 1f); close()
+                }
+                canvas.drawPath(q, paint)
+                drawCircle(canvas, cx, cy + 4f, 9f, 0xC8C6FF)
+            }
+            else -> {
+                drawCircle(canvas, cx, cy + 1f, 9f, MINT)
+                drawCircle(canvas, cx + 1f, cy - 8f, 4f, LEAF)
+            }
+        }
+    }
+
+    private fun drawShopScrollIndicator(canvas: Canvas, itemCount: Int) {
+        val maxScroll = maxShopScroll(itemCount)
+        if (maxScroll <= 0f) return
+        val top = SHOP_VIEWPORT_TOP + 4f
+        val bottom = SHOP_VIEWPORT_BOTTOM - 4f
+        val thumbHeight = 34f
+        val travel = (bottom - top - thumbHeight).coerceAtLeast(0f)
+        val fraction = (shopScrollY / maxScroll).coerceIn(0f, 1f)
+        val thumbTop = top + travel * fraction
+        paint.color = color(TRACK)
+        rect.set(320f, top, 323f, bottom)
+        canvas.drawRoundRect(rect, 1.5f, 1.5f, paint)
+        paint.color = color(MINT)
+        rect.set(319f, thumbTop, 324f, thumbTop + thumbHeight)
+        canvas.drawRoundRect(rect, 2f, 2f, paint)
+    }
 
     // ---------------------------------------------------------------- pet body
 
@@ -512,7 +698,26 @@ class PetView(context: Context) : View(context) {
         canvas.scale(visuals.scaleX * growthScale, visuals.scaleY * growthScale)
         canvas.translate(-180f, -150f)
 
-        // Tiny ears behind the body.
+        when (state.activePetId) {
+            "bunny" -> drawBunnyBase(canvas)
+            "fox" -> drawFoxBase(canvas)
+            "cat" -> drawCatBase(canvas)
+            else -> drawSproutBase(canvas, visuals, growthStage)
+        }
+        drawFace(canvas, visuals)
+        drawAccessory(canvas, state.equippedAccessoryId)
+        if (growthStage >= 2 && state.activePetId != ShopCatalog.STARTER_PET_ID) {
+            drawMatureBloom(canvas)
+        }
+        if (visuals.showHearts) drawHappyHearts(canvas)
+        canvas.restore()
+
+        if (visuals.showZzz) drawSleepZzz(canvas)
+        if (visuals.showQuestion) drawCuriosityMark(canvas)
+        if (visuals.showEvolution) drawEvolutionSparkles(canvas, behavior?.stateElapsedMs ?: 0L)
+    }
+
+    private fun drawSproutBase(canvas: Canvas, visuals: PetVisuals, growthStage: Int) {
         val leftEar = Path().apply {
             moveTo(148f, 143f); quadTo(138f, 119f, 160f, 126f); lineTo(169f, 141f); close()
         }
@@ -522,27 +727,119 @@ class PetView(context: Context) : View(context) {
             moveTo(191f, 141f); lineTo(201f, 126f); quadTo(224f, 119f, 212f, 145f); close()
         }
         canvas.drawPath(rightEar, paint)
-
-        // Body.
         paint.color = color(MINT)
         canvas.drawRoundRect(RectF(143f, 124f, 217f, 185f), 27f, 27f, paint)
         paint.color = color(MINT_LIGHT)
         canvas.drawOval(RectF(157f, 157f, 203f, 181f), paint)
-
         val stageLeafDroop = visuals.leafDroopDeg + when (growthStage) {
-            0 -> 12f  // the baby leaf is still soft and droopy
+            0 -> 12f
             1 -> 2f
-            else -> -6f // mature leaf stands a little prouder
+            else -> -6f
         }
         drawSprout(canvas, stageLeafDroop)
         if (growthStage >= 2) drawMatureBloom(canvas)
-        drawFace(canvas, visuals)
-        if (visuals.showHearts) drawHappyHearts(canvas)
-        canvas.restore()
+    }
 
-        if (visuals.showZzz) drawSleepZzz(canvas)
-        if (visuals.showQuestion) drawCuriosityMark(canvas)
-        if (visuals.showEvolution) drawEvolutionSparkles(canvas, behavior?.stateElapsedMs ?: 0L)
+    private fun drawBunnyBase(canvas: Canvas) {
+        val leftEar = Path().apply {
+            moveTo(154f, 139f); quadTo(148f, 103f, 163f, 101f); quadTo(176f, 105f, 171f, 140f); close()
+        }
+        val rightEar = Path().apply {
+            moveTo(188f, 139f); quadTo(185f, 103f, 199f, 103f); quadTo(212f, 108f, 207f, 142f); close()
+        }
+        paint.color = color(0xF1DDE8)
+        canvas.drawPath(leftEar, paint); canvas.drawPath(rightEar, paint)
+        paint.color = color(0xE6AFC8)
+        val innerLeft = Path().apply {
+            moveTo(159f, 130f); quadTo(156f, 111f, 163f, 109f); quadTo(169f, 114f, 166f, 132f); close()
+        }
+        val innerRight = Path().apply {
+            moveTo(193f, 132f); quadTo(191f, 114f, 198f, 111f); quadTo(204f, 115f, 202f, 132f); close()
+        }
+        canvas.drawPath(innerLeft, paint); canvas.drawPath(innerRight, paint)
+        paint.color = color(0xF1DDE8)
+        canvas.drawOval(RectF(143f, 125f, 217f, 185f), paint)
+        paint.color = color(0xFFF6FA)
+        canvas.drawOval(RectF(157f, 157f, 203f, 181f), paint)
+    }
+
+    private fun drawFoxBase(canvas: Canvas) {
+        val tail = Path().apply {
+            moveTo(151f, 163f); quadTo(124f, 163f, 132f, 185f); quadTo(150f, 190f, 160f, 176f); close()
+        }
+        paint.color = color(0xE9823F)
+        canvas.drawPath(tail, paint)
+        paint.color = color(0xFFF0D7)
+        canvas.drawOval(RectF(130f, 179f, 143f, 188f), paint)
+        val leftEar = Path().apply {
+            moveTo(147f, 143f); lineTo(151f, 113f); lineTo(173f, 137f); close()
+        }
+        val rightEar = Path().apply {
+            moveTo(187f, 137f); lineTo(209f, 113f); lineTo(215f, 145f); close()
+        }
+        paint.color = color(0xE9823F)
+        canvas.drawPath(leftEar, paint); canvas.drawPath(rightEar, paint)
+        paint.color = color(0xF5A35B)
+        canvas.drawRoundRect(RectF(143f, 124f, 217f, 185f), 24f, 24f, paint)
+        paint.color = color(0xFFF0D7)
+        canvas.drawOval(RectF(158f, 153f, 202f, 181f), paint)
+    }
+
+    private fun drawCatBase(canvas: Canvas) {
+        val leftEar = Path().apply {
+            moveTo(146f, 143f); lineTo(150f, 112f); lineTo(174f, 135f); close()
+        }
+        val rightEar = Path().apply {
+            moveTo(186f, 135f); lineTo(210f, 112f); lineTo(215f, 144f); close()
+        }
+        paint.color = color(0xC8C6FF)
+        canvas.drawPath(leftEar, paint); canvas.drawPath(rightEar, paint)
+        paint.color = color(0xF1AFC7)
+        val innerLeft = Path().apply { moveTo(151f, 134f); lineTo(153f, 120f); lineTo(165f, 135f); close() }
+        val innerRight = Path().apply { moveTo(195f, 135f); lineTo(207f, 120f); lineTo(209f, 134f); close() }
+        canvas.drawPath(innerLeft, paint); canvas.drawPath(innerRight, paint)
+        paint.color = color(0xC8C6FF)
+        canvas.drawRoundRect(RectF(143f, 124f, 217f, 185f), 25f, 25f, paint)
+        paint.color = color(0xF0EFFF)
+        canvas.drawOval(RectF(157f, 157f, 203f, 181f), paint)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 5f
+        paint.strokeCap = Paint.Cap.ROUND
+        val tail = Path().apply { moveTo(211f, 169f); quadTo(228f, 178f, 216f, 185f); quadTo(208f, 189f, 208f, 181f) }
+        paint.color = color(0xA6A3F0)
+        canvas.drawPath(tail, paint)
+        paint.style = Paint.Style.FILL
+        paint.strokeCap = Paint.Cap.BUTT
+    }
+
+    private fun drawAccessory(canvas: Canvas, id: String) {
+        when (id) {
+            "flower_crown" -> {
+                drawCircle(canvas, 164f, 119f, 4.4f, PINK)
+                drawCircle(canvas, 173f, 115f, 4.4f, MINT_LIGHT)
+                drawCircle(canvas, 182f, 117f, 4.4f, PINK)
+                drawCircle(canvas, 191f, 120f, 4.4f, PINK)
+                drawCircle(canvas, 173f, 115f, 1.8f, GOLD)
+                drawCircle(canvas, 164f, 119f, 1.7f, GOLD)
+                drawCircle(canvas, 182f, 117f, 1.7f, GOLD)
+                drawCircle(canvas, 191f, 120f, 1.7f, GOLD)
+            }
+            "scarf" -> {
+                val band = Path().apply {
+                    moveTo(147f, 166f); quadTo(180f, 172f, 213f, 166f)
+                    lineTo(210f, 176f); quadTo(180f, 182f, 150f, 176f); close()
+                }
+                paint.color = color(PINK)
+                canvas.drawPath(band, paint)
+                val tail = Path().apply {
+                    moveTo(195f, 174f); lineTo(207f, 175f); lineTo(204f, 190f); lineTo(196f, 185f); close()
+                }
+                canvas.drawPath(tail, paint)
+                paint.color = color(0xFFFFD9E2.toInt())
+                canvas.drawLine(154f, 174f, 198f, 178f, paint)
+            }
+            "star_pin" -> drawSparkle(canvas, 207f, 127f, 7f, GOLD, 255)
+        }
     }
 
     /** A tiny blossom is the visual marker of the mature stage. */
@@ -889,6 +1186,42 @@ class PetView(context: Context) : View(context) {
             return true
         }
 
+        if (mode == Mode.SHOP) {
+            val deltaY = y - touchDownY
+            val deltaX = x - touchDownX
+            val beganInList = touchDownY in SHOP_VIEWPORT_TOP..SHOP_VIEWPORT_BOTTOM
+            if (beganInList && abs(deltaY) >= TASK_SWIPE_THRESHOLD && abs(deltaY) > abs(deltaX)) {
+                shopScrollY = (shopScrollY - deltaY).coerceIn(0f, maxShopScroll(ShopCatalog.items(shopCategory).size))
+                invalidate()
+                return true
+            }
+            if (y in 55f..89f) {
+                when {
+                    x in 40f..176f -> { shopCategory = ShopItemType.ACCESSORY; shopScrollY = 0f }
+                    x in 184f..320f -> { shopCategory = ShopItemType.PET; shopScrollY = 0f }
+                }
+                invalidate()
+                return true
+            }
+            if (x in 120f..240f && y in 302f..342f) {
+                mode = Mode.HOME
+                invalidate()
+                return true
+            }
+            if (beganInList && x in 38f..320f) {
+                val items = ShopCatalog.items(shopCategory)
+                val index = kotlin.math.round((y + shopScrollY - SHOP_FIRST_ROW_CENTER) / SHOP_ROW_HEIGHT).toInt()
+                if (index in items.indices) {
+                    val rowCenter = SHOP_FIRST_ROW_CENTER + index * SHOP_ROW_HEIGHT - shopScrollY
+                    if (kotlin.math.abs(y - rowCenter) <= SHOP_ROW_HALF_HEIGHT + 4f) {
+                        listener?.onShopItemSelected(items[index].id)
+                    }
+                }
+                return true
+            }
+            return true
+        }
+
         if (mode == Mode.GAME) {
             if (y in 308f..344f && x in 130f..230f) {
                 finishGameEarly()
@@ -912,6 +1245,16 @@ class PetView(context: Context) : View(context) {
             } else {
                 gameHint = "差一点，再试试"
             }
+            invalidate()
+            return true
+        }
+
+        // Top-left coin shop button (home only).
+        if (x in 60f..121f && y in 35f..69f) {
+            shopScrollY = 0f
+            shopCategory = ShopItemType.ACCESSORY
+            shopNotice = "购买装饰，或解锁新的伙伴。"
+            mode = Mode.SHOP
             invalidate()
             return true
         }
@@ -999,7 +1342,7 @@ class PetView(context: Context) : View(context) {
         )
     }
 
-    private enum class Mode { HOME, GAME, TASKS }
+    private enum class Mode { HOME, GAME, TASKS, SHOP }
     private enum class Action { FEED, PET, GAME }
 
     private companion object {
@@ -1013,6 +1356,11 @@ class PetView(context: Context) : View(context) {
         const val TASK_ROW_CARD_HALF_HEIGHT = 25f
         const val TASK_COUNT = 5
         const val TASK_SWIPE_THRESHOLD = 24f
+        const val SHOP_VIEWPORT_TOP = 90f
+        const val SHOP_VIEWPORT_BOTTOM = 284f
+        const val SHOP_FIRST_ROW_CENTER = 112f
+        const val SHOP_ROW_HEIGHT = 53f
+        const val SHOP_ROW_HALF_HEIGHT = 23f
         const val ROTATION_MS = 1_500L
         const val HIT_WINDOW_RADIANS = 0.27
 
