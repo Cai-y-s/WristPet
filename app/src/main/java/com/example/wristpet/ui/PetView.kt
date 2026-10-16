@@ -102,6 +102,23 @@ class PetView(context: Context) : View(context) {
     private var catPawTargetExpiresAt = 0L
     private var catPawHint = "快速点击金币和鱼干，避开炸弹！"
 
+    // Fuxing Catch Coins: move Fuxing horizontally to catch falling rewards.
+    private data class FallingCatchItem(
+        val id: Long,
+        val x: Float,
+        var y: Float,
+        val kind: FallingKind,
+        val speed: Float
+    )
+    private enum class FallingKind { COIN, FISH, ROCK }
+    private val fuxingCatchItems = mutableListOf<FallingCatchItem>()
+    private var fuxingCatchX = 180f
+    private var fuxingCatchRawScore = 0
+    private var fuxingCatchHint = "左右滑动福星，接住金币和鱼干！"
+    private var fuxingNextItemId = 1L
+    private var fuxingNextSpawnAt = 0L
+    private var fuxingLastUpdateAt = 0L
+
     /** Wall-clock anchor used to compute frame deltas for the behavior machine. */
     private var lastFrameAt = 0L
 
@@ -111,16 +128,20 @@ class PetView(context: Context) : View(context) {
     private val ticker = object : Runnable {
         override fun run() {
             if (!isInteractive) return
-            if (mode == Mode.GAME || mode == Mode.CAT_PAW) {
+            if (isTimedGameMode()) {
                 if (!gameResultSent && gameElapsed() >= activeGameLengthMs()) {
                     finishGameNormally()
-                } else if (mode == Mode.CAT_PAW) {
-                    updateCatPawTarget()
+                } else {
+                    when (mode) {
+                        Mode.CAT_PAW -> updateCatPawTarget()
+                        Mode.FUXING_CATCH -> updateFuxingCatch()
+                        else -> Unit
+                    }
                 }
             } else if (mode == Mode.HOME) {
                 advanceBehavior()
             }
-            if (mode == Mode.HOME || mode == Mode.GAME || mode == Mode.CAT_PAW || mode == Mode.GAME_MENU) invalidate()
+            if (mode == Mode.HOME || isTimedGameMode() || mode == Mode.GAME_MENU) invalidate()
             handler.postDelayed(this, frameIntervalMs())
         }
     }
@@ -181,9 +202,11 @@ class PetView(context: Context) : View(context) {
         handler.removeCallbacks(ticker)
         if (active) {
             if (isTimedGameMode() && gameStartedAt == 0L) gameStartedAt = now
+            if (mode == Mode.FUXING_CATCH) fuxingLastUpdateAt = now
             lastFrameAt = now
             handler.post(ticker)
         } else {
+            if (mode == Mode.FUXING_CATCH) fuxingLastUpdateAt = 0L
             lastFrameAt = 0L
         }
     }
@@ -200,7 +223,7 @@ class PetView(context: Context) : View(context) {
 
     /** Lively states animate fast; sleepy states slow down to save battery. */
     private fun frameIntervalMs(): Long = when (mode) {
-        Mode.GAME, Mode.CAT_PAW -> 45L
+        Mode.GAME, Mode.CAT_PAW, Mode.FUXING_CATCH -> 45L
         Mode.GAME_MENU -> 500L
         // Detail pages are static; active drag/fling events redraw them independently.
         Mode.TASKS -> 1_000L
@@ -230,6 +253,7 @@ class PetView(context: Context) : View(context) {
             Mode.GAME_MENU -> drawGameMenu(canvas)
             Mode.GAME -> drawGame(canvas)
             Mode.CAT_PAW -> drawCatPawGame(canvas)
+            Mode.FUXING_CATCH -> drawFuxingCatchGame(canvas)
             Mode.TASKS -> drawDailyTasks(canvas)
             Mode.SHOP -> drawShop(canvas)
         }
@@ -1274,44 +1298,70 @@ class PetView(context: Context) : View(context) {
     // ---------------------------------------------------------------- minigame selector + games
 
     private fun drawGameMenu(canvas: Canvas) {
-        text(canvas, "选择小游戏", 180f, 38f, 17f, TEXT, bold = true)
-        text(canvas, "玩一局，赚金币！", 180f, 57f, 10f, MUTED)
+        text(canvas, "选择小游戏", 180f, 34f, 17f, TEXT, bold = true)
+        text(canvas, "玩一局，赚金币！", 180f, 52f, 10f, MUTED)
 
-        // Existing timing game card.
+        // Three compact cards sized for the round watch display.
         paint.color = color(PANEL)
-        rect.set(48f, 77f, 312f, 158f)
-        canvas.drawRoundRect(rect, 16f, 16f, paint)
+        rect.set(48f, 64f, 312f, 130f)
+        canvas.drawRoundRect(rect, 14f, 14f, paint)
         paint.color = color(TRACK)
         paint.style = Paint.Style.STROKE
-        paint.strokeWidth = 5f
-        canvas.drawCircle(82f, 116f, 18f, paint)
+        paint.strokeWidth = 4.5f
+        canvas.drawCircle(80f, 95f, 17f, paint)
         paint.style = Paint.Style.FILL
         paint.color = color(MINT)
-        rect.set(64f, 98f, 100f, 134f)
+        rect.set(63f, 79f, 97f, 113f)
         canvas.drawArc(rect, -110f, 38f, false, paint)
-        drawCircle(canvas, 82f, 98f, 4f, GOLD)
-        text(canvas, "卡点挑战", 116f, 108f, 13f, TEXT, bold = true, align = Paint.Align.LEFT)
-        text(canvas, "抓准光点经过亮区的时机", 116f, 128f, 9.4f, MUTED, align = Paint.Align.LEFT)
-        text(canvas, "10 秒", 285f, 148f, 9f, MINT, bold = true)
-
-        // New cat-paw quick tap game card.
-        paint.color = color(PANEL)
-        rect.set(48f, 171f, 312f, 252f)
-        canvas.drawRoundRect(rect, 16f, 16f, paint)
-        drawCircle(canvas, 82f, 207f, 19f, 0x254B8068)
-        drawCircle(canvas, 75f, 201f, 4.5f, PINK)
-        drawCircle(canvas, 87f, 201f, 4.5f, PINK)
-        drawCircle(canvas, 72f, 212f, 4.5f, PINK)
-        drawCircle(canvas, 84f, 212f, 4.5f, PINK)
-        drawCircle(canvas, 80f, 207f, 6f, MINT_LIGHT)
-        text(canvas, "猫爪快拍", 116f, 201f, 13f, TEXT, bold = true, align = Paint.Align.LEFT)
-        text(canvas, "快速点击金币与鱼干，避开炸弹", 116f, 221f, 9.0f, MUTED, align = Paint.Align.LEFT)
-        text(canvas, "20 秒", 285f, 242f, 9f, GOLD, bold = true)
+        drawCircle(canvas, 80f, 78f, 4f, GOLD)
+        text(canvas, "卡点挑战", 108f, 89f, 12f, TEXT, bold = true, align = Paint.Align.LEFT)
+        text(canvas, "抓准光点经过亮区的时机", 108f, 107f, 8.5f, MUTED, align = Paint.Align.LEFT)
+        text(canvas, "10 秒", 286f, 121f, 8.5f, MINT, bold = true)
 
         paint.color = color(PANEL)
-        rect.set(126f, 306f, 234f, 336f)
+        rect.set(48f, 137f, 312f, 203f)
+        canvas.drawRoundRect(rect, 14f, 14f, paint)
+        drawCircle(canvas, 80f, 169f, 19f, 0x254B8068)
+        drawCircle(canvas, 73f, 163f, 4.5f, PINK)
+        drawCircle(canvas, 85f, 163f, 4.5f, PINK)
+        drawCircle(canvas, 70f, 174f, 4.5f, PINK)
+        drawCircle(canvas, 82f, 174f, 4.5f, PINK)
+        drawCircle(canvas, 78f, 169f, 6f, MINT_LIGHT)
+        text(canvas, "猫爪快拍", 108f, 163f, 12f, TEXT, bold = true, align = Paint.Align.LEFT)
+        text(canvas, "点击金币和鱼干，避开炸弹", 108f, 181f, 8.5f, MUTED, align = Paint.Align.LEFT)
+        text(canvas, "20 秒", 286f, 194f, 8.5f, GOLD, bold = true)
+
+        paint.color = color(PANEL)
+        rect.set(48f, 210f, 312f, 276f)
+        canvas.drawRoundRect(rect, 14f, 14f, paint)
+        drawFuxingMiniIcon(canvas, 80f, 241f)
+        text(canvas, "福星接金币", 108f, 236f, 12f, TEXT, bold = true, align = Paint.Align.LEFT)
+        text(canvas, "左右滑动，接金币鱼干躲石头", 108f, 254f, 8.5f, MUTED, align = Paint.Align.LEFT)
+        text(canvas, "30 秒", 286f, 267f, 8.5f, GOLD, bold = true)
+
+        paint.color = color(PANEL)
+        rect.set(126f, 305f, 234f, 335f)
         canvas.drawRoundRect(rect, 15f, 15f, paint)
-        text(canvas, "返回主页", 180f, 325f, 11f, TEXT, bold = true)
+        text(canvas, "返回主页", 180f, 324f, 11f, TEXT, bold = true)
+    }
+
+    private fun drawFuxingMiniIcon(canvas: Canvas, cx: Float, cy: Float) {
+        drawCircle(canvas, cx, cy, 20f, 0x254B8068)
+        paint.color = color(FUXING_ORANGE)
+        canvas.drawRoundRect(RectF(cx - 12f, cy - 12f, cx + 12f, cy + 12f), 8f, 8f, paint)
+        val leftEar = Path().apply { moveTo(cx - 12f, cy - 5f); lineTo(cx - 9f, cy - 18f); lineTo(cx - 2f, cy - 9f); close() }
+        val rightEar = Path().apply { moveTo(cx + 2f, cy - 9f); lineTo(cx + 9f, cy - 18f); lineTo(cx + 12f, cy - 5f); close() }
+        paint.color = color(FUXING_ORANGE)
+        canvas.drawPath(leftEar, paint)
+        canvas.drawPath(rightEar, paint)
+        drawCircle(canvas, cx - 5f, cy - 2f, 1.7f, FACE)
+        drawCircle(canvas, cx + 5f, cy - 2f, 1.7f, FACE)
+        paint.color = color(FUXING_COLLAR)
+        rect.set(cx - 5f, cy + 5f, cx + 5f, cy + 13f)
+        canvas.drawRoundRect(rect, 1.5f, 1.5f, paint)
+        paint.color = color(FUXING_BADGE_BLUE)
+        rect.set(cx - 3.5f, cy + 6f, cx + 3.5f, cy + 11f)
+        canvas.drawRoundRect(rect, 1f, 1f, paint)
     }
 
     private fun drawCatPawGame(canvas: Canvas) {
@@ -1380,6 +1430,180 @@ class PetView(context: Context) : View(context) {
                 text(canvas, "!", cx, cy + 7f, 15f, TEXT, bold = true)
             }
         }
+    }
+
+    // ---------------------------------------------------------------- Fuxing catches coins
+
+    private fun drawFuxingCatchGame(canvas: Canvas) {
+        val elapsed = gameElapsed().coerceAtMost(FUXING_CATCH_GAME_LENGTH_MS)
+        val remaining = ((FUXING_CATCH_GAME_LENGTH_MS - elapsed + 999L) / 1_000L).toInt().coerceAtLeast(0)
+        text(canvas, "福星接金币", 180f, 32f, 16f, TEXT, bold = true)
+        text(canvas, "左右滑动福星，接金币和鱼干！", 180f, 51f, 9.5f, MUTED)
+
+        // Soft lane lines stay inside the circular screen's safe area.
+        paint.color = color(TRACK)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1.5f
+        canvas.drawLine(78f, 73f, 78f, 260f, paint)
+        canvas.drawLine(282f, 73f, 282f, 260f, paint)
+        paint.style = Paint.Style.FILL
+
+        for (item in fuxingCatchItems) drawFuxingCatchItem(canvas, item)
+        drawFuxingCatcher(canvas)
+
+        text(canvas, "得分 ${fuxingCatchRawScore}", 112f, 284f, 11f, TEXT, bold = true)
+        text(canvas, "剩余 ${remaining} 秒", 248f, 284f, 10f, MUTED)
+        drawBar(canvas, 78f, 292f, 282f, 1f - elapsed.toFloat() / FUXING_CATCH_GAME_LENGTH_MS, GOLD)
+        text(canvas, fuxingCatchHint, 180f, 308f, 8.8f, if (fuxingCatchHint.contains("接住") || fuxingCatchHint.contains("金币 +") || fuxingCatchHint.contains("鱼干 +")) MINT else MUTED)
+        paint.color = color(PANEL)
+        rect.set(139f, 315f, 221f, 339f)
+        canvas.drawRoundRect(rect, 12f, 12f, paint)
+        text(canvas, "结束", 180f, 331f, 10f, TEXT)
+    }
+
+    private fun drawFuxingCatchItem(canvas: Canvas, item: FallingCatchItem) {
+        when (item.kind) {
+            FallingKind.COIN -> {
+                drawCircle(canvas, item.x, item.y, 13f, 0x254B8068)
+                drawCircle(canvas, item.x, item.y, 9f, GOLD)
+                paint.color = color(0xFFB98B37.toInt())
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = 1.5f
+                canvas.drawCircle(item.x, item.y, 5.5f, paint)
+                paint.style = Paint.Style.FILL
+                drawCircle(canvas, item.x, item.y, 2f, TEXT)
+            }
+            FallingKind.FISH -> {
+                val body = Path().apply {
+                    moveTo(item.x - 12f, item.y)
+                    quadTo(item.x - 2f, item.y - 10f, item.x + 8f, item.y - 3f)
+                    quadTo(item.x + 13f, item.y, item.x + 8f, item.y + 3f)
+                    quadTo(item.x - 2f, item.y + 10f, item.x - 12f, item.y)
+                    close()
+                }
+                val tail = Path().apply {
+                    moveTo(item.x + 7f, item.y)
+                    lineTo(item.x + 16f, item.y - 7f)
+                    lineTo(item.x + 16f, item.y + 7f)
+                    close()
+                }
+                paint.color = color(MINT_LIGHT)
+                canvas.drawPath(body, paint)
+                paint.color = color(MINT)
+                canvas.drawPath(tail, paint)
+                drawCircle(canvas, item.x - 6f, item.y - 1.5f, 1.5f, FACE)
+            }
+            FallingKind.ROCK -> {
+                val rock = Path().apply {
+                    moveTo(item.x - 11f, item.y + 6f)
+                    lineTo(item.x - 8f, item.y - 7f)
+                    lineTo(item.x + 1f, item.y - 12f)
+                    lineTo(item.x + 11f, item.y - 3f)
+                    lineTo(item.x + 8f, item.y + 8f)
+                    close()
+                }
+                paint.color = color(0xFF697780.toInt())
+                canvas.drawPath(rock, paint)
+                paint.color = color(0xFF9AA6AC.toInt())
+                canvas.drawLine(item.x - 4f, item.y - 5f, item.x + 2f, item.y - 7f, paint)
+            }
+        }
+    }
+
+    private fun drawFuxingCatcher(canvas: Canvas) {
+        val catcherY = FUXING_CATCHER_Y
+        drawCircle(canvas, fuxingCatchX, catcherY + 2f, 24f, HALO)
+        canvas.save()
+        canvas.translate(fuxingCatchX, catcherY)
+        canvas.scale(FUXING_CATCHER_SCALE, FUXING_CATCHER_SCALE)
+        canvas.translate(-180f, -150f)
+        val visual = PetVisuals()
+        drawFuxingBase(canvas)
+        drawFace(canvas, visual)
+        drawFuxingFaceDetails(canvas)
+        // The blue-framed badge remains visible on the mini-game catcher.
+        drawFuxingIdBadge(canvas)
+        canvas.restore()
+    }
+
+    private fun startFuxingCatchGame() {
+        mode = Mode.FUXING_CATCH
+        gameElapsedBeforePause = 0L
+        gameStartedAt = SystemClock.elapsedRealtime()
+        gameResultSent = false
+        fuxingCatchX = 180f
+        fuxingCatchRawScore = 0
+        fuxingCatchHint = "左右滑动福星，接住金币和鱼干！"
+        fuxingNextItemId = 1L
+        fuxingNextSpawnAt = 0L
+        fuxingLastUpdateAt = SystemClock.elapsedRealtime()
+        fuxingCatchItems.clear()
+        spawnFuxingCatchItem(0L)
+        fuxingNextSpawnAt = FUXING_FIRST_SPAWN_MS
+        invalidate()
+    }
+
+    private fun spawnFuxingCatchItem(elapsed: Long) {
+        if (fuxingCatchItems.size >= FUXING_MAX_ITEMS) return
+        val roll = Random.nextInt(100)
+        val kind = when {
+            roll < 58 -> FallingKind.COIN
+            roll < 82 -> FallingKind.FISH
+            else -> FallingKind.ROCK
+        }
+        val difficulty = if (elapsed >= 15_000L) 1.22f else 1f
+        val speed = Random.nextInt(FUXING_MIN_FALL_SPEED, FUXING_MAX_FALL_SPEED + 1) * difficulty
+        val x = Random.nextInt(FUXING_MIN_X.toInt(), FUXING_MAX_X.toInt() + 1).toFloat()
+        fuxingCatchItems += FallingCatchItem(
+            id = fuxingNextItemId++,
+            x = x,
+            y = FUXING_SPAWN_Y,
+            kind = kind,
+            speed = speed
+        )
+    }
+
+    private fun updateFuxingCatch() {
+        val now = SystemClock.elapsedRealtime()
+        if (fuxingLastUpdateAt == 0L) fuxingLastUpdateAt = now
+        val deltaMs = (now - fuxingLastUpdateAt).coerceIn(0L, FUXING_MAX_FRAME_DELTA_MS)
+        fuxingLastUpdateAt = now
+        val elapsed = gameElapsed()
+
+        if (elapsed >= fuxingNextSpawnAt && fuxingCatchItems.size < FUXING_MAX_ITEMS) {
+            spawnFuxingCatchItem(elapsed)
+            val interval = if (elapsed >= 15_000L) FUXING_SPAWN_INTERVAL_LATE_MS else FUXING_SPAWN_INTERVAL_MS
+            fuxingNextSpawnAt = elapsed + Random.nextLong(interval.first, interval.last + 1L)
+        }
+
+        val deltaSeconds = deltaMs.toFloat() / 1_000f
+        val iterator = fuxingCatchItems.iterator()
+        while (iterator.hasNext()) {
+            val item = iterator.next()
+            item.y += item.speed * deltaSeconds
+            val inCatchBand = item.y >= FUXING_CATCHER_Y - FUXING_CATCH_BAND_ABOVE &&
+                item.y <= FUXING_CATCHER_Y + FUXING_CATCH_BAND_BELOW
+            if (inCatchBand && abs(item.x - fuxingCatchX) <= FUXING_CATCH_HALF_WIDTH) {
+                when (item.kind) {
+                    FallingKind.COIN -> {
+                        fuxingCatchRawScore = (fuxingCatchRawScore + 1).coerceAtMost(FUXING_RAW_SCORE_CAP)
+                        fuxingCatchHint = "接住金币！+1"
+                    }
+                    FallingKind.FISH -> {
+                        fuxingCatchRawScore = (fuxingCatchRawScore + 2).coerceAtMost(FUXING_RAW_SCORE_CAP)
+                        fuxingCatchHint = "接住鱼干！+2"
+                    }
+                    FallingKind.ROCK -> {
+                        fuxingCatchRawScore = (fuxingCatchRawScore - 2).coerceAtLeast(0)
+                        fuxingCatchHint = "哎呀，接到石头了！-2"
+                    }
+                }
+                iterator.remove()
+            } else if (item.y > FUXING_CATCHER_Y + FUXING_CATCH_BAND_BELOW || item.y > FUXING_DESPAWN_Y) {
+                iterator.remove()
+            }
+        }
+        invalidate()
     }
 
     private fun startGameMenu() {
@@ -1501,9 +1725,14 @@ class PetView(context: Context) : View(context) {
         invalidate()
     }
 
-    private fun isTimedGameMode(): Boolean = mode == Mode.GAME || mode == Mode.CAT_PAW
+    private fun isTimedGameMode(): Boolean =
+        mode == Mode.GAME || mode == Mode.CAT_PAW || mode == Mode.FUXING_CATCH
 
-    private fun activeGameLengthMs(): Long = if (mode == Mode.CAT_PAW) CAT_PAW_GAME_LENGTH_MS else GAME_LENGTH_MS
+    private fun activeGameLengthMs(): Long = when (mode) {
+        Mode.CAT_PAW -> CAT_PAW_GAME_LENGTH_MS
+        Mode.FUXING_CATCH -> FUXING_CATCH_GAME_LENGTH_MS
+        else -> GAME_LENGTH_MS
+    }
 
     private fun gameElapsed(): Long {
         val runningSegment = if (isTimedGameMode() && isInteractive && gameStartedAt != 0L) {
@@ -1516,13 +1745,18 @@ class PetView(context: Context) : View(context) {
 
     private fun rewardScoreForCurrentGame(): Int = when (mode) {
         Mode.CAT_PAW -> (catPawRawScore / CAT_PAW_POINTS_PER_REWARD).coerceIn(0, PetState.MAX_GAME_SCORE)
+        Mode.FUXING_CATCH -> (fuxingCatchRawScore / FUXING_POINTS_PER_REWARD).coerceIn(0, PetState.MAX_GAME_SCORE)
         else -> gameScore.coerceIn(0, PetState.MAX_GAME_SCORE)
     }
 
     private fun finishGameNormally() {
         if (!isTimedGameMode() || gameResultSent) return
         val finishedMode = mode
-        val gameId = if (finishedMode == Mode.CAT_PAW) "cat_paw" else "timing"
+        val gameId = when (finishedMode) {
+            Mode.CAT_PAW -> "cat_paw"
+            Mode.FUXING_CATCH -> "fuxing_catch"
+            else -> "timing"
+        }
         val rewardScore = rewardScoreForMode(finishedMode)
         gameResultSent = true
         mode = Mode.HOME
@@ -1538,7 +1772,11 @@ class PetView(context: Context) : View(context) {
     private fun finishGameEarly() {
         if (!isTimedGameMode() || gameResultSent) return
         val finishedMode = mode
-        val gameId = if (finishedMode == Mode.CAT_PAW) "cat_paw" else "timing"
+        val gameId = when (finishedMode) {
+            Mode.CAT_PAW -> "cat_paw"
+            Mode.FUXING_CATCH -> "fuxing_catch"
+            else -> "timing"
+        }
         val rewardScore = rewardScoreForMode(finishedMode)
         gameResultSent = true
         mode = Mode.HOME
@@ -1551,10 +1789,10 @@ class PetView(context: Context) : View(context) {
         invalidate()
     }
 
-    private fun rewardScoreForMode(finishedMode: Mode): Int = if (finishedMode == Mode.CAT_PAW) {
-        (catPawRawScore / CAT_PAW_POINTS_PER_REWARD).coerceIn(0, PetState.MAX_GAME_SCORE)
-    } else {
-        gameScore.coerceIn(0, PetState.MAX_GAME_SCORE)
+    private fun rewardScoreForMode(finishedMode: Mode): Int = when (finishedMode) {
+        Mode.CAT_PAW -> (catPawRawScore / CAT_PAW_POINTS_PER_REWARD).coerceIn(0, PetState.MAX_GAME_SCORE)
+        Mode.FUXING_CATCH -> (fuxingCatchRawScore / FUXING_POINTS_PER_REWARD).coerceIn(0, PetState.MAX_GAME_SCORE)
+        else -> gameScore.coerceIn(0, PetState.MAX_GAME_SCORE)
     }
 
     private fun cancelScrollFling() {
@@ -1608,6 +1846,10 @@ class PetView(context: Context) : View(context) {
 
         if (event.action == MotionEvent.ACTION_DOWN) {
             cancelScrollFling()
+            if (mode == Mode.FUXING_CATCH && y < 307f) {
+                fuxingCatchX = x.coerceIn(FUXING_MIN_X, FUXING_MAX_X)
+                invalidate()
+            }
             touchDownX = x
             touchDownY = y
             lastTouchY = y
@@ -1624,6 +1866,13 @@ class PetView(context: Context) : View(context) {
         }
 
         if (event.action == MotionEvent.ACTION_MOVE) {
+            if (mode == Mode.FUXING_CATCH) {
+                if (y < 307f) fuxingCatchX = x.coerceIn(FUXING_MIN_X, FUXING_MAX_X)
+                lastTouchY = y
+                lastMoveTime = event.eventTime
+                invalidate()
+                return true
+            }
             if (touchStartedInScrollableViewport && touchStartMode == mode) {
                 val totalX = x - touchDownX
                 val totalY = y - touchDownY
@@ -1715,14 +1964,32 @@ class PetView(context: Context) : View(context) {
                 invalidate()
                 return true
             }
-            if (y in 77f..158f && x in 40f..320f) {
+            if (y in 64f..130f && x in 40f..320f) {
                 startGame()
                 return true
             }
-            if (y in 171f..252f && x in 40f..320f) {
+            if (y in 137f..203f && x in 40f..320f) {
                 startCatPawGame()
                 return true
             }
+            if (y in 210f..276f && x in 40f..320f) {
+                startFuxingCatchGame()
+                return true
+            }
+            return true
+        }
+
+        if (mode == Mode.FUXING_CATCH) {
+            if (y in 310f..345f && x in 130f..230f) {
+                finishGameEarly()
+                return true
+            }
+            if (gameElapsed() >= FUXING_CATCH_GAME_LENGTH_MS) {
+                finishGameNormally()
+                return true
+            }
+            if (y < 307f) fuxingCatchX = x.coerceIn(FUXING_MIN_X, FUXING_MAX_X)
+            invalidate()
             return true
         }
 
@@ -1858,7 +2125,7 @@ class PetView(context: Context) : View(context) {
         )
     }
 
-    private enum class Mode { HOME, GAME_MENU, GAME, CAT_PAW, TASKS, SHOP }
+    private enum class Mode { HOME, GAME_MENU, GAME, CAT_PAW, FUXING_CATCH, TASKS, SHOP }
     private enum class Action { FEED, PET, GAME }
 
     private companion object {
@@ -1869,6 +2136,29 @@ class PetView(context: Context) : View(context) {
         const val CAT_PAW_HIT_RADIUS = 26f
         const val CAT_PAW_RAW_SCORE_CAP = 14
         const val CAT_PAW_POINTS_PER_REWARD = 2
+        const val FUXING_CATCH_GAME_LENGTH_MS = 30_000L
+        const val FUXING_CATCHER_Y = 246f
+        const val FUXING_CATCHER_SCALE = 0.43f
+        const val FUXING_CATCH_HALF_WIDTH = 26f
+        const val FUXING_CATCH_BAND_ABOVE = 19f
+        const val FUXING_CATCH_BAND_BELOW = 7f
+        const val FUXING_SPAWN_Y = 78f
+        const val FUXING_DESPAWN_Y = 282f
+        const val FUXING_MIN_X = 82f
+        const val FUXING_MAX_X = 278f
+        const val FUXING_MAX_ITEMS = 7
+        const val FUXING_MIN_FALL_SPEED = 68
+        const val FUXING_MAX_FALL_SPEED = 102
+        const val FUXING_FIRST_SPAWN_MS = 420L
+        const val FUXING_SPAWN_INTERVAL_MS_MIN = 460L
+        const val FUXING_SPAWN_INTERVAL_MS_MAX = 700L
+        val FUXING_SPAWN_INTERVAL_MS = FUXING_SPAWN_INTERVAL_MS_MIN..FUXING_SPAWN_INTERVAL_MS_MAX
+        const val FUXING_SPAWN_INTERVAL_LATE_MS_MIN = 350L
+        const val FUXING_SPAWN_INTERVAL_LATE_MS_MAX = 560L
+        val FUXING_SPAWN_INTERVAL_LATE_MS = FUXING_SPAWN_INTERVAL_LATE_MS_MIN..FUXING_SPAWN_INTERVAL_LATE_MS_MAX
+        const val FUXING_MAX_FRAME_DELTA_MS = 90L
+        const val FUXING_RAW_SCORE_CAP = 36
+        const val FUXING_POINTS_PER_REWARD = 3
         const val QUESTION_MARK_MS = 1_700L
         // Task and shop details share identical card sizes and a common scroll viewport.
         const val DETAIL_VIEWPORT_TOP = 90f
