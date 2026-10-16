@@ -132,7 +132,7 @@ data class PetState(
         const val MAX_TOTAL_EXP = 1980
         const val MAX_GAME_SCORE = 7
         const val MAX_COINS = 99999
-        const val MAX_DAILY_GAME_COINS = 12
+        const val MAX_DAILY_GAME_COINS = 20
         const val FEED_HUNGER_LIMIT = 85
         const val FEED_AMOUNT = 28
         const val PET_AFFECTION_AMOUNT = 4

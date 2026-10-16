@@ -16,6 +16,7 @@ import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.sin
+import kotlin.random.Random
 
 import com.example.wristpet.pet.DailyRewards
 import com.example.wristpet.pet.DailyTask
@@ -93,6 +94,14 @@ class PetView(context: Context) : View(context) {
     private var gameHint = "光点到达顶部亮区时点击"
     private var gameResultSent = false
 
+    // Cat Paw Quick Tap state. Scores are normalized at settlement to the shared 0..MAX_GAME_SCORE scale.
+    private var catPawRawScore = 0
+    private var catPawTargetX = 180f
+    private var catPawTargetY = 160f
+    private var catPawTarget = CatPawTarget.COIN
+    private var catPawTargetExpiresAt = 0L
+    private var catPawHint = "快速点击金币和鱼干，避开炸弹！"
+
     /** Wall-clock anchor used to compute frame deltas for the behavior machine. */
     private var lastFrameAt = 0L
 
@@ -102,14 +111,16 @@ class PetView(context: Context) : View(context) {
     private val ticker = object : Runnable {
         override fun run() {
             if (!isInteractive) return
-            if (mode == Mode.GAME) {
-                if (!gameResultSent && gameElapsed() >= GAME_LENGTH_MS) {
+            if (mode == Mode.GAME || mode == Mode.CAT_PAW) {
+                if (!gameResultSent && gameElapsed() >= activeGameLengthMs()) {
                     finishGameNormally()
+                } else if (mode == Mode.CAT_PAW) {
+                    updateCatPawTarget()
                 }
             } else if (mode == Mode.HOME) {
                 advanceBehavior()
             }
-            if (mode == Mode.HOME || mode == Mode.GAME) invalidate()
+            if (mode == Mode.HOME || mode == Mode.GAME || mode == Mode.CAT_PAW || mode == Mode.GAME_MENU) invalidate()
             handler.postDelayed(this, frameIntervalMs())
         }
     }
@@ -161,7 +172,7 @@ class PetView(context: Context) : View(context) {
         if (isInteractive == active) return
         val now = SystemClock.elapsedRealtime()
         if (!active) cancelScrollFling()
-        if (!active && mode == Mode.GAME && gameStartedAt != 0L) {
+        if (!active && isTimedGameMode() && gameStartedAt != 0L) {
             // Pause the game clock while the app is backgrounded or the screen is off.
             gameElapsedBeforePause += (now - gameStartedAt).coerceAtLeast(0L)
             gameStartedAt = 0L
@@ -169,7 +180,7 @@ class PetView(context: Context) : View(context) {
         isInteractive = active
         handler.removeCallbacks(ticker)
         if (active) {
-            if (mode == Mode.GAME && gameStartedAt == 0L) gameStartedAt = now
+            if (isTimedGameMode() && gameStartedAt == 0L) gameStartedAt = now
             lastFrameAt = now
             handler.post(ticker)
         } else {
@@ -189,7 +200,8 @@ class PetView(context: Context) : View(context) {
 
     /** Lively states animate fast; sleepy states slow down to save battery. */
     private fun frameIntervalMs(): Long = when (mode) {
-        Mode.GAME -> 45L
+        Mode.GAME, Mode.CAT_PAW -> 45L
+        Mode.GAME_MENU -> 500L
         // Detail pages are static; active drag/fling events redraw them independently.
         Mode.TASKS -> 1_000L
         Mode.SHOP -> 1_000L
@@ -215,7 +227,9 @@ class PetView(context: Context) : View(context) {
         canvas.scale(logicalScale, logicalScale)
         when (mode) {
             Mode.HOME -> drawHome(canvas)
+            Mode.GAME_MENU -> drawGameMenu(canvas)
             Mode.GAME -> drawGame(canvas)
+            Mode.CAT_PAW -> drawCatPawGame(canvas)
             Mode.TASKS -> drawDailyTasks(canvas)
             Mode.SHOP -> drawShop(canvas)
         }
@@ -1257,7 +1271,186 @@ class PetView(context: Context) : View(context) {
         paint.alpha = 255
     }
 
-    // ---------------------------------------------------------------- minigame
+    // ---------------------------------------------------------------- minigame selector + games
+
+    private fun drawGameMenu(canvas: Canvas) {
+        text(canvas, "选择小游戏", 180f, 38f, 17f, TEXT, bold = true)
+        text(canvas, "玩一局，赚金币！", 180f, 57f, 10f, MUTED)
+
+        // Existing timing game card.
+        paint.color = color(PANEL)
+        rect.set(48f, 77f, 312f, 158f)
+        canvas.drawRoundRect(rect, 16f, 16f, paint)
+        paint.color = color(TRACK)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 5f
+        canvas.drawCircle(82f, 116f, 18f, paint)
+        paint.style = Paint.Style.FILL
+        paint.color = color(MINT)
+        rect.set(64f, 98f, 100f, 134f)
+        canvas.drawArc(rect, -110f, 38f, false, paint)
+        drawCircle(canvas, 82f, 98f, 4f, GOLD)
+        text(canvas, "卡点挑战", 116f, 108f, 13f, TEXT, bold = true, align = Paint.Align.LEFT)
+        text(canvas, "抓准光点经过亮区的时机", 116f, 128f, 9.4f, MUTED, align = Paint.Align.LEFT)
+        text(canvas, "10 秒", 285f, 148f, 9f, MINT, bold = true)
+
+        // New cat-paw quick tap game card.
+        paint.color = color(PANEL)
+        rect.set(48f, 171f, 312f, 252f)
+        canvas.drawRoundRect(rect, 16f, 16f, paint)
+        drawCircle(canvas, 82f, 207f, 19f, 0x254B8068)
+        drawCircle(canvas, 75f, 201f, 4.5f, PINK)
+        drawCircle(canvas, 87f, 201f, 4.5f, PINK)
+        drawCircle(canvas, 72f, 212f, 4.5f, PINK)
+        drawCircle(canvas, 84f, 212f, 4.5f, PINK)
+        drawCircle(canvas, 80f, 207f, 6f, MINT_LIGHT)
+        text(canvas, "猫爪快拍", 116f, 201f, 13f, TEXT, bold = true, align = Paint.Align.LEFT)
+        text(canvas, "快速点击金币与鱼干，避开炸弹", 116f, 221f, 9.0f, MUTED, align = Paint.Align.LEFT)
+        text(canvas, "20 秒", 285f, 242f, 9f, GOLD, bold = true)
+
+        paint.color = color(PANEL)
+        rect.set(126f, 306f, 234f, 336f)
+        canvas.drawRoundRect(rect, 15f, 15f, paint)
+        text(canvas, "返回主页", 180f, 325f, 11f, TEXT, bold = true)
+    }
+
+    private fun drawCatPawGame(canvas: Canvas) {
+        val elapsed = gameElapsed().coerceAtMost(CAT_PAW_GAME_LENGTH_MS)
+        val remaining = ((CAT_PAW_GAME_LENGTH_MS - elapsed + 999L) / 1_000L).toInt().coerceAtLeast(0)
+        text(canvas, "猫爪快拍", 180f, 34f, 17f, TEXT, bold = true)
+        text(canvas, "拍金币和鱼干，避开炸弹！", 180f, 54f, 10f, MUTED)
+
+        paint.color = color(TRACK)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 2f
+        canvas.drawCircle(180f, 166f, 75f, paint)
+        paint.style = Paint.Style.FILL
+
+        if (elapsed < catPawTargetExpiresAt) {
+            drawCatPawTarget(canvas, catPawTarget, catPawTargetX, catPawTargetY)
+        }
+
+        text(canvas, "得分 $catPawRawScore", 180f, 260f, 12f, TEXT, bold = true)
+        text(canvas, "剩余 ${remaining} 秒", 180f, 279f, 10f, MUTED)
+        drawBar(canvas, 78f, 287f, 282f, 1f - elapsed.toFloat() / CAT_PAW_GAME_LENGTH_MS, GOLD)
+        text(canvas, catPawHint, 180f, 304f, 9f, if (catPawHint.contains("命中") || catPawHint.contains("接住")) MINT else MUTED)
+        paint.color = color(PANEL)
+        rect.set(139f, 313f, 221f, 339f)
+        canvas.drawRoundRect(rect, 13f, 13f, paint)
+        text(canvas, "结束", 180f, 330f, 10f, TEXT)
+    }
+
+    private fun drawCatPawTarget(canvas: Canvas, target: CatPawTarget, cx: Float, cy: Float) {
+        when (target) {
+            CatPawTarget.COIN -> {
+                drawCircle(canvas, cx, cy, 22f, 0x254B8068)
+                drawCircle(canvas, cx, cy, 15f, GOLD)
+                drawCircle(canvas, cx, cy, 10f, 0xFFB98B37.toInt())
+                text(canvas, "$", cx, cy + 5f, 16f, TEXT, bold = true)
+            }
+            CatPawTarget.FISH -> {
+                val body = Path().apply {
+                    moveTo(cx - 14f, cy)
+                    quadTo(cx - 4f, cy - 13f, cx + 9f, cy - 4f)
+                    quadTo(cx + 14f, cy, cx + 9f, cy + 4f)
+                    quadTo(cx - 4f, cy + 13f, cx - 14f, cy)
+                    close()
+                }
+                val tail = Path().apply {
+                    moveTo(cx + 9f, cy); lineTo(cx + 20f, cy - 9f); lineTo(cx + 20f, cy + 9f); close()
+                }
+                paint.color = color(MINT)
+                canvas.drawPath(body, paint)
+                canvas.drawPath(tail, paint)
+                drawCircle(canvas, cx - 8f, cy - 2f, 1.8f, FACE)
+            }
+            CatPawTarget.BOMB -> {
+                drawCircle(canvas, cx, cy + 2f, 16f, 0xFF344047.toInt())
+                val fuse = Path().apply {
+                    moveTo(cx + 1f, cy - 13f); quadTo(cx + 6f, cy - 22f, cx + 12f, cy - 18f)
+                }
+                paint.color = color(GOLD)
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = 3f
+                paint.strokeCap = Paint.Cap.ROUND
+                canvas.drawPath(fuse, paint)
+                paint.style = Paint.Style.FILL
+                paint.strokeCap = Paint.Cap.BUTT
+                drawSparkle(canvas, cx + 13f, cy - 19f, 3.5f, PINK, 255)
+                text(canvas, "!", cx, cy + 7f, 15f, TEXT, bold = true)
+            }
+        }
+    }
+
+    private fun startGameMenu() {
+        cancelScrollFling()
+        mode = Mode.GAME_MENU
+        invalidate()
+    }
+
+    private fun startCatPawGame() {
+        mode = Mode.CAT_PAW
+        gameElapsedBeforePause = 0L
+        gameStartedAt = SystemClock.elapsedRealtime()
+        gameResultSent = false
+        catPawRawScore = 0
+        catPawHint = "快速点击金币和鱼干，避开炸弹！"
+        spawnCatPawTarget(0L)
+        invalidate()
+    }
+
+    private fun spawnCatPawTarget(elapsed: Long) {
+        catPawTarget = when (Random.nextInt(100)) {
+            in 0..44 -> CatPawTarget.COIN
+            in 45..79 -> CatPawTarget.FISH
+            else -> CatPawTarget.BOMB
+        }
+        // Keep targets comfortably inside the circular screen's safe area.
+        catPawTargetX = Random.nextInt(126, 235).toFloat()
+        catPawTargetY = Random.nextInt(112, 220).toFloat()
+        catPawTargetExpiresAt = elapsed + CAT_PAW_TARGET_LIFETIME_MS
+    }
+
+    private fun updateCatPawTarget() {
+        val elapsed = gameElapsed()
+        if (elapsed >= catPawTargetExpiresAt) spawnCatPawTarget(elapsed)
+    }
+
+    private fun catPawHitAt(x: Float, y: Float) {
+        val elapsed = gameElapsed()
+        if (elapsed >= catPawTargetExpiresAt) {
+            spawnCatPawTarget(elapsed)
+            catPawHint = "新目标出现啦，快拍！"
+            invalidate()
+            return
+        }
+        val dx = x - catPawTargetX
+        val dy = y - catPawTargetY
+        if (dx * dx + dy * dy > CAT_PAW_HIT_RADIUS * CAT_PAW_HIT_RADIUS) {
+            catPawHint = "没拍中，再试试！"
+            invalidate()
+            return
+        }
+
+        when (catPawTarget) {
+            CatPawTarget.COIN -> {
+                catPawRawScore = (catPawRawScore + 1).coerceAtMost(CAT_PAW_RAW_SCORE_CAP)
+                catPawHint = "命中金币！+1"
+            }
+            CatPawTarget.FISH -> {
+                catPawRawScore = (catPawRawScore + 2).coerceAtMost(CAT_PAW_RAW_SCORE_CAP)
+                catPawHint = "接住鱼干！+2"
+            }
+            CatPawTarget.BOMB -> {
+                catPawRawScore = (catPawRawScore - 2).coerceAtLeast(0)
+                catPawHint = "哎呀，拍到炸弹了！-2"
+            }
+        }
+        spawnCatPawTarget(elapsed)
+        invalidate()
+    }
+
+    private enum class CatPawTarget { COIN, FISH, BOMB }
 
     private fun drawGame(canvas: Canvas) {
         text(canvas, "卡点挑战", 180f, 39f, 17f, TEXT, bold = true)
@@ -1308,8 +1501,12 @@ class PetView(context: Context) : View(context) {
         invalidate()
     }
 
+    private fun isTimedGameMode(): Boolean = mode == Mode.GAME || mode == Mode.CAT_PAW
+
+    private fun activeGameLengthMs(): Long = if (mode == Mode.CAT_PAW) CAT_PAW_GAME_LENGTH_MS else GAME_LENGTH_MS
+
     private fun gameElapsed(): Long {
-        val runningSegment = if (mode == Mode.GAME && isInteractive && gameStartedAt != 0L) {
+        val runningSegment = if (isTimedGameMode() && isInteractive && gameStartedAt != 0L) {
             (SystemClock.elapsedRealtime() - gameStartedAt).coerceAtLeast(0L)
         } else {
             0L
@@ -1317,30 +1514,47 @@ class PetView(context: Context) : View(context) {
         return (gameElapsedBeforePause + runningSegment).coerceAtLeast(0L)
     }
 
+    private fun rewardScoreForCurrentGame(): Int = when (mode) {
+        Mode.CAT_PAW -> (catPawRawScore / CAT_PAW_POINTS_PER_REWARD).coerceIn(0, PetState.MAX_GAME_SCORE)
+        else -> gameScore.coerceIn(0, PetState.MAX_GAME_SCORE)
+    }
+
     private fun finishGameNormally() {
-        if (mode != Mode.GAME || gameResultSent) return
+        if (!isTimedGameMode() || gameResultSent) return
+        val finishedMode = mode
+        val gameId = if (finishedMode == Mode.CAT_PAW) "cat_paw" else "timing"
+        val rewardScore = rewardScoreForMode(finishedMode)
         gameResultSent = true
         mode = Mode.HOME
         gameStartedAt = 0L
         listener?.onMiniGameFinished(
-            gameId = "timing",
-            score = gameScore.coerceIn(0, PetState.MAX_GAME_SCORE),
+            gameId = gameId,
+            score = rewardScore,
             completedNormally = true
         )
         invalidate()
     }
 
     private fun finishGameEarly() {
-        if (mode != Mode.GAME || gameResultSent) return
+        if (!isTimedGameMode() || gameResultSent) return
+        val finishedMode = mode
+        val gameId = if (finishedMode == Mode.CAT_PAW) "cat_paw" else "timing"
+        val rewardScore = rewardScoreForMode(finishedMode)
         gameResultSent = true
         mode = Mode.HOME
         gameStartedAt = 0L
         listener?.onMiniGameFinished(
-            gameId = "timing",
-            score = gameScore.coerceIn(0, PetState.MAX_GAME_SCORE),
+            gameId = gameId,
+            score = rewardScore,
             completedNormally = false
         )
         invalidate()
+    }
+
+    private fun rewardScoreForMode(finishedMode: Mode): Int = if (finishedMode == Mode.CAT_PAW) {
+        (catPawRawScore / CAT_PAW_POINTS_PER_REWARD).coerceIn(0, PetState.MAX_GAME_SCORE)
+    } else {
+        gameScore.coerceIn(0, PetState.MAX_GAME_SCORE)
     }
 
     private fun cancelScrollFling() {
@@ -1495,6 +1709,36 @@ class PetView(context: Context) : View(context) {
             return true
         }
 
+        if (mode == Mode.GAME_MENU) {
+            if (x in 120f..240f && y in 300f..340f) {
+                mode = Mode.HOME
+                invalidate()
+                return true
+            }
+            if (y in 77f..158f && x in 40f..320f) {
+                startGame()
+                return true
+            }
+            if (y in 171f..252f && x in 40f..320f) {
+                startCatPawGame()
+                return true
+            }
+            return true
+        }
+
+        if (mode == Mode.CAT_PAW) {
+            if (y in 308f..344f && x in 130f..230f) {
+                finishGameEarly()
+                return true
+            }
+            if (gameElapsed() >= CAT_PAW_GAME_LENGTH_MS) {
+                finishGameNormally()
+                return true
+            }
+            catPawHitAt(x, y)
+            return true
+        }
+
         if (mode == Mode.GAME) {
             if (y in 308f..344f && x in 130f..230f) {
                 finishGameEarly()
@@ -1561,7 +1805,7 @@ class PetView(context: Context) : View(context) {
             when {
                 x in 40f..116f -> listener?.onFeed()
                 x in 142f..218f -> listener?.onPet()
-                x in 244f..320f -> startGame()
+                x in 244f..320f -> startGameMenu()
             }
         }
         return true
@@ -1614,12 +1858,17 @@ class PetView(context: Context) : View(context) {
         )
     }
 
-    private enum class Mode { HOME, GAME, TASKS, SHOP }
+    private enum class Mode { HOME, GAME_MENU, GAME, CAT_PAW, TASKS, SHOP }
     private enum class Action { FEED, PET, GAME }
 
     private companion object {
         const val DESIGN_SIZE = 360f
         const val GAME_LENGTH_MS = 10_000L
+        const val CAT_PAW_GAME_LENGTH_MS = 20_000L
+        const val CAT_PAW_TARGET_LIFETIME_MS = 820L
+        const val CAT_PAW_HIT_RADIUS = 26f
+        const val CAT_PAW_RAW_SCORE_CAP = 14
+        const val CAT_PAW_POINTS_PER_REWARD = 2
         const val QUESTION_MARK_MS = 1_700L
         // Task and shop details share identical card sizes and a common scroll viewport.
         const val DETAIL_VIEWPORT_TOP = 90f
